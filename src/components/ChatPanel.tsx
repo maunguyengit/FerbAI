@@ -3,7 +3,7 @@ import { AIError, fetchProviderStatus, streamChat, type ProviderStatus } from '.
 import { decodeSelection, getModel, getProvider } from '../lib/providers'
 import { getApiKey } from '../lib/storage'
 import { parseReply } from '../lib/drawblock'
-import type { AIAction, AIGraphEquation, ChatContext, ChatMessage, View } from '../lib/types'
+import type { AIAction, AIGraphEquation, ChatContext, ChatMessage, View, VizSpec } from '../lib/types'
 import './ChatPanel.css'
 
 interface Props {
@@ -14,6 +14,7 @@ interface Props {
   getContext: () => ChatContext
   applyDraw: (actions: AIAction[]) => number
   applyGraph: (eqs: AIGraphEquation[]) => number
+  applyViz: (spec: VizSpec) => string | null
   keysVersion: number
 }
 
@@ -21,7 +22,7 @@ let msgSeq = 0
 const mid = () => `m_${Date.now().toString(36)}_${msgSeq++}`
 
 export default function ChatPanel({
-  selection, view, getActiveImage, activeEmpty, getContext, applyDraw, applyGraph, keysVersion,
+  selection, view, getActiveImage, activeEmpty, getContext, applyDraw, applyGraph, applyViz, keysVersion,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
@@ -38,6 +39,7 @@ export default function ChatPanel({
   const hasKey = !!status[providerId]?.configured || !!getApiKey(providerId)
   const visionOn = !!model?.vision
   const onGraph = view === 'graph'
+  const onViz = view === 'viz'
 
   useEffect(() => {
     const ctrl = new AbortController()
@@ -80,7 +82,7 @@ export default function ChatPanel({
     const userMsg: ChatMessage = {
       id: mid(),
       role: 'user',
-      text: text || (onGraph ? '(look at my graph — what next?)' : '(reading my board — what next?)'),
+      text: text || (onViz ? '(build me something interactive to learn this)' : onGraph ? '(look at my graph — what next?)' : '(reading my board — what next?)'),
       image: image ?? undefined,
     }
     const assistantMsg: ChatMessage = { id: mid(), role: 'assistant', text: '', pending: true }
@@ -109,14 +111,16 @@ export default function ChatPanel({
           setMessages((m) => m.map((x) => (x.id === assistantMsg.id ? { ...x, text: clean } : x)))
         },
       })
-      const { clean, actions, graph } = parseReply(full)
+      const { clean, actions, graph, viz } = parseReply(full)
       let drew = 0
       let graphed = 0
+      let built: string | undefined
       if (actions && actions.length) drew = applyDraw(actions)
       if (graph && graph.length) graphed = applyGraph(graph)
-      const fallback = drew ? '✎ Added that to your board.' : graphed ? '∿ Plotted that on the graph.' : ''
+      if (viz) built = applyViz(viz) ?? undefined
+      const fallback = drew ? '✎ Added that to your board.' : graphed ? '∿ Plotted that on the graph.' : built ? `◆ Built an interactive: ${built}.` : ''
       setMessages((m) =>
-        m.map((x) => (x.id === assistantMsg.id ? { ...x, text: clean || fallback, drew, graphed, pending: false } : x)),
+        m.map((x) => (x.id === assistantMsg.id ? { ...x, text: clean || fallback, drew, graphed, built, pending: false } : x)),
       )
     } catch (err) {
       const message = err instanceof AIError ? err.message
@@ -164,11 +168,11 @@ export default function ChatPanel({
       <div className="chat__log" ref={scrollRef}>
         {messages.length === 0 && (
           <div className="chat__intro">
-            <p className="chat__intro-big">Draw it or graph it.<br />I see it. I work <b>on it</b>.</p>
+            <p className="chat__intro-big">Draw it. Graph it. <b>Play</b> with it.</p>
             <ul className="chat__intro-list">
               <li><b>Board:</b> sketch a problem — I write the next step on it.</li>
-              <li><b>Graph:</b> ask "plot the derivative of x³+3x²" or "graph x²+y²+z²=9" — I plot it.</li>
-              <li>Pick a <b>vision</b> model up top so I can see the {onGraph ? 'graph' : 'board'}.</li>
+              <li><b>Graph:</b> "plot the derivative of x³+3x²" or "graph x²+y²+z²=9".</li>
+              <li><b>Learn:</b> "teach me binary search trees" — I build an interactive you step through and edit.</li>
             </ul>
           </div>
         )}
@@ -193,6 +197,9 @@ export default function ChatPanel({
               {!m.pending && !!m.graphed && (
                 <span className="msg__act">∿ plotted {m.graphed} function{m.graphed > 1 ? 's' : ''}</span>
               )}
+              {!m.pending && !!m.built && (
+                <span className="msg__act">◆ built interactive · {m.built}</span>
+              )}
             </div>
           </div>
         ))}
@@ -200,20 +207,22 @@ export default function ChatPanel({
 
       <div className="chat__compose">
         <div className="chat__toggles">
-          <label className={`toggle ${!visionOn ? 'toggle--off' : ''}`}>
-            <input type="checkbox" checked={includeBoard} onChange={(e) => setIncludeBoard(e.target.checked)} disabled={!visionOn} />
-            <span>{visionOn ? `${onGraph ? 'graph' : 'board'} snapshot attached` : 'model has no vision'}</span>
-          </label>
+          {!onViz && (
+            <label className={`toggle ${!visionOn ? 'toggle--off' : ''}`}>
+              <input type="checkbox" checked={includeBoard} onChange={(e) => setIncludeBoard(e.target.checked)} disabled={!visionOn} />
+              <span>{visionOn ? `${onGraph ? 'graph' : 'board'} snapshot attached` : 'model has no vision'}</span>
+            </label>
+          )}
           <label className="toggle">
             <input type="checkbox" checked={aiActs} onChange={(e) => setAiActs(e.target.checked)} />
-            <span>{onGraph ? '∿ AI plots on graph' : '✎ AI draws on board'}</span>
+            <span>{onViz ? '◆ AI builds interactives' : onGraph ? '∿ AI plots on graph' : '✎ AI draws on board'}</span>
           </label>
         </div>
         <div className="chat__inputrow">
           <textarea
             className="chat__input"
             value={input}
-            placeholder={onGraph ? 'Ask me to graph something…' : "Ask about what's on the board…"}
+            placeholder={onViz ? 'Ask me to teach you a concept…' : onGraph ? 'Ask me to graph something…' : "Ask about what's on the board…"}
             rows={2}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}

@@ -47,10 +47,14 @@ app.post('/api/chat', async (req, res) => {
 
   // Attach the board geometry to the latest user turn so the model can place
   // its writing accurately (where the empty space is) instead of guessing.
-  const mode = context?.mode === 'graph' ? 'graph' : 'board'
-  const note = mode === 'graph' ? graphNote(context?.graph) : boardNote(context?.boardMeta)
+  const mode = context?.mode === 'graph' ? 'graph' : context?.mode === 'viz' ? 'viz' : 'board'
+  const note = mode === 'graph' ? graphNote(context?.graph)
+    : mode === 'viz' ? vizNote(context?.viz)
+    : boardNote(context?.boardMeta)
   const directive = !wantAct ? '' : mode === 'graph'
     ? `\n\n[GRAPH IT: For THIS turn you MUST include exactly one ferbai-graph block with the requested function(s). Keep spoken guidance short and outside the block.]`
+    : mode === 'viz'
+    ? `\n\n[BUILD IT: For THIS turn you MUST include exactly one ferbai-viz block selecting the most fitting widget (prefer a built-in over custom). Keep spoken guidance short and outside the block.]`
     : `\n\n[ACT ON THE BOARD: For THIS turn you MUST include exactly one ferbai-draw block that writes your next step in the empty space (do not overlap their work). Keep spoken guidance short and outside the block.]`
   const turns = messages.map((m) => ({ ...m }))
   const suffix = `${note}${directive}`
@@ -151,6 +155,23 @@ function graphNote(graph) {
   )
 }
 
+// Describe the Learn/visualization view + the menu of reusable widgets.
+function vizNote(viz) {
+  const cur = viz?.current
+    ? `Currently showing the "${viz.current.widget}" interactive ("${viz.current.title}").`
+    : 'Nothing is shown yet.'
+  const catalog = viz?.catalog || '(no widget catalog provided)'
+  return (
+    `\n\n[LEARN VIEW is active. ${cur}\n` +
+    `Build an interactive lesson by emitting a ferbai-viz JSON block: ` +
+    `{"widget":"<key>","title":"...","intro":"1-2 sentences","data":{...},"narration":["step 1","step 2"]}.\n` +
+    `STRONGLY PREFER a built-in widget below — they are pre-built, bug-free, and fully interactive (the user can step, edit, drag). ` +
+    `Only fall back to "custom" when nothing fits, and then put the raw HTML in a SEPARATE ferbai-html block (not inside the JSON).\n` +
+    `Available widgets:\n${catalog}\n` +
+    `Pick the best-fitting widget, fill in its data, and write a short intro. Keep your spoken guidance OUTSIDE the block.]`
+  )
+}
+
 // ---------------------------------------------------------------- upstream calls
 function buildHistory(messages, image, sendImage, shape) {
   return messages
@@ -196,7 +217,7 @@ function callAnthropic({ base, apiKey, model, messages, image, sendImage, signal
     },
     body: JSON.stringify({
       model,
-      max_tokens: 1024,
+      max_tokens: 4096,
       system: SYSTEM_PROMPT,
       stream: true,
       messages: buildHistory(messages, image, sendImage, 'anthropic'),
@@ -215,7 +236,7 @@ function callOpenAI({ base, apiKey, model, messages, image, sendImage, signal })
     body: JSON.stringify({
       model,
       stream: true,
-      max_tokens: 1024,
+      max_tokens: 4096,
       messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...buildHistory(messages, image, sendImage, 'openai')],
     }),
   })

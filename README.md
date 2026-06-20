@@ -49,6 +49,36 @@ OpenAI-compatible groups at any gateway (OpenRouter, a self-hosted proxy, the
 real OpenCode Go endpoint, etc.). Adjust model IDs in
 [`src/lib/providers.ts`](src/lib/providers.ts) to match your gateway.
 
+## Learn window — interactive lessons the AI builds (not videos)
+
+Toggle the left panel to **◆ Learn**. Ask the tutor to teach a concept and it
+builds something you **step through, edit, and explore** — active learning, not a
+wall of text.
+
+- *"Teach me binary search trees"* → an interactive BST: insert / find / remove /
+  traverse, stepping through every comparison, editable values.
+- *"Teach me selection sort with 9, 3, 7, 1, 5"* → an animated sorter with
+  play / step / speed and an editable array.
+- *"Teach me how a stack works"* → a custom push/pop visualizer.
+
+**The architecture (fighting AI generation error).** The AI does **not** generate
+interactive code from scratch — that's where LLMs break. Instead:
+
+1. **Tier 1 — reusable widgets.** A registry of pre-built, tested, fully
+   interactive widgets ([`src/components/viz/`](src/components/viz/)) owns *all*
+   the hard parts (stepping, animation, drag, editing). The AI emits only a tiny
+   **spec** — which widget + initial data + narration — via a `ferbai-viz` JSON
+   block. Near-zero generation risk. The widget catalog
+   ([`src/lib/viz/registry.ts`](src/lib/viz/registry.ts)) is fed to the AI's
+   prompt so it knows what to reuse.
+2. **Tier 2 — sandboxed custom.** When no widget fits, the AI emits self-contained
+   HTML in a *separate* `ferbai-html` block (raw HTML in its own fence — no JSON
+   escaping to corrupt), rendered in a **sandboxed iframe** (`allow-scripts`, no
+   same-origin) so it can't touch the app.
+
+Adding a new widget is one registry entry + one component — the AI can use it
+immediately. Starter chips let you explore the built-ins without asking the AI.
+
 ## Graph window (Desmos-style 2D + 3D) the AI can plot on
 
 Toggle the left panel between **✎ Board** and **∿ Graph** (top bar). The graph

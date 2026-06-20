@@ -1,64 +1,80 @@
-// Parses the AI's reply into spoken text + board actions + graph equations.
+// Parses the AI's reply into spoken text + board actions + graph equations + a
+// visualization spec.
 //
-// The model emits machine instructions inside fenced blocks:
+//   ```ferbai-draw      → whiteboard      { "actions": [ ... ] }
+//   ```ferbai-graph     → graph window    { "equations": [ ... ] }
+//   ```ferbai-viz       → visualization   { "widget": "...", "data": {...}, ... }
 //
-//   ```ferbai-draw      → whiteboard           { "actions": [ ... ] }
-//   ```ferbai-graph     → graph window         { "equations": [ {"eq":"y=x^2"}, ... ] }
-//
-// We strip those blocks from what the user reads, and hand the payloads to the
-// board / graph. During streaming a block may still be open (no closing fence) —
-// everything from the opening fence onward is hidden so raw JSON never flashes.
+// Blocks are stripped from what the user reads; the payloads drive the surfaces.
+// During streaming a block may be open — everything from the opening fence on is
+// hidden so raw JSON / HTML never flashes.
 
-import type { AIAction, AIGraphEquation } from './types'
+import type { AIAction, AIGraphEquation, VizSpec } from './types'
 
 const DRAW_CLOSED = /```\s*ferbai-draw\s*([\s\S]*?)```/i
 const GRAPH_CLOSED = /```\s*ferbai-graph\s*([\s\S]*?)```/i
-const ANY_OPEN = /```\s*ferbai-(draw|graph)/i
+const VIZ_CLOSED = /```\s*ferbai-viz\s*([\s\S]*?)```/i
+// raw HTML for custom widgets lives in its OWN fence — no JSON escaping, so a
+// stray quote/newline in the model's HTML can't corrupt the spec.
+const HTML_CLOSED = /```\s*ferbai-html\s*([\s\S]*?)```/i
+const ANY_OPEN = /```\s*ferbai-(draw|graph|viz|html)/i
 
 export interface ParsedReply {
   clean: string
   actions: AIAction[] | null
   graph: AIGraphEquation[] | null
+  viz: VizSpec | null
 }
 
 export function parseReply(raw: string): ParsedReply {
   let clean = raw
   let actions: AIAction[] | null = null
   let graph: AIGraphEquation[] | null = null
+  let viz: VizSpec | null = null
 
   const draw = raw.match(DRAW_CLOSED)
-  if (draw) {
-    actions = pick<AIAction>(draw[1], 'actions')
-    clean = clean.replace(DRAW_CLOSED, '').trim()
-  }
+  if (draw) { actions = pickArray<AIAction>(draw[1], 'actions'); clean = clean.replace(DRAW_CLOSED, '').trim() }
+
   const g = raw.match(GRAPH_CLOSED)
-  if (g) {
-    graph = pick<AIGraphEquation>(g[1], 'equations')
-    clean = clean.replace(GRAPH_CLOSED, '').trim()
+  if (g) { graph = pickArray<AIGraphEquation>(g[1], 'equations'); clean = clean.replace(GRAPH_CLOSED, '').trim() }
+
+  const v = raw.match(VIZ_CLOSED)
+  if (v) { viz = pickViz(v[1]); clean = clean.replace(VIZ_CLOSED, '').trim() }
+
+  // a separate raw-HTML block feeds custom widgets without JSON escaping
+  const htmlBlock = raw.match(HTML_CLOSED)
+  if (htmlBlock) {
+    clean = clean.replace(HTML_CLOSED, '').trim()
+    const html = htmlBlock[1].trim()
+    if (html) {
+      if (viz) { if (!viz.html) viz.html = html }
+      else viz = { widget: 'custom', html } // html block alone implies a custom viz
+    }
   }
 
-  // hide any still-open (streaming) block
   const open = clean.match(ANY_OPEN)
   if (open && open.index !== undefined) clean = clean.slice(0, open.index).trim()
 
-  return { clean: clean.trim(), actions, graph }
+  return { clean: clean.trim(), actions, graph, viz }
 }
 
-function pick<T>(jsonish: string, key: string): T[] | null {
-  const text = jsonish.trim()
-  const tryParse = (s: string): T[] | null => {
-    try {
-      const parsed = JSON.parse(s)
-      const arr = Array.isArray(parsed) ? parsed : parsed?.[key]
-      return Array.isArray(arr) ? (arr as T[]) : null
-    } catch {
-      return null
-    }
-  }
-  const direct = tryParse(text)
-  if (direct) return direct
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start >= 0 && end > start) return tryParse(text.slice(start, end + 1))
+function parseLoose(text: string): unknown {
+  const t = text.trim()
+  try { return JSON.parse(t) } catch { /* try to salvage */ }
+  const start = t.indexOf('{'), end = t.lastIndexOf('}')
+  if (start >= 0 && end > start) { try { return JSON.parse(t.slice(start, end + 1)) } catch { /* */ } }
+  return null
+}
+
+function pickArray<T>(jsonish: string, key: string): T[] | null {
+  const parsed = parseLoose(jsonish) as Record<string, unknown> | unknown[] | null
+  if (Array.isArray(parsed)) return parsed as T[]
+  const arr = parsed && (parsed as Record<string, unknown>)[key]
+  return Array.isArray(arr) ? (arr as T[]) : null
+}
+
+function pickViz(jsonish: string): VizSpec | null {
+  const parsed = parseLoose(jsonish) as Record<string, unknown> | null
+  if (parsed && typeof parsed.widget === 'string') return parsed as unknown as VizSpec
   return null
 }

@@ -108,14 +108,35 @@ export interface GraphHandle {
   addEquations: (eqs: AIGraphEquation[]) => number
 }
 
+// ---------- Visualization ----------
+/** Declarative spec the AI emits (in a `ferbai-viz` block). The widget owns all
+ *  interaction; the AI supplies only the data + narration. */
+export interface VizSpec {
+  widget: string
+  title?: string
+  intro?: string
+  data?: Record<string, unknown>
+  config?: Record<string, unknown>
+  narration?: string[]
+  html?: string
+}
+
+export interface VizHandle {
+  render: (spec: VizSpec) => void
+  isEmpty: () => boolean
+  /** short summary of what's currently shown, for the AI's context */
+  getCurrent: () => { widget: string; title: string } | null
+}
+
 // ---------- Left-panel view ----------
-export type View = 'board' | 'graph'
+export type View = 'board' | 'graph' | 'viz'
 
 /** What the chat sends to the AI about the active left-panel view. */
 export interface ChatContext {
   mode: View
   boardMeta?: BoardMeta | null
   graph?: { dim: GraphDim; equations: string[] }
+  viz?: { current: { widget: string; title: string } | null; catalog: string }
 }
 
 // ---------- Chat ----------
@@ -131,6 +152,8 @@ export interface ChatMessage {
   drew?: number
   /** number of equations the AI plotted on the graph for this turn */
   graphed?: number
+  /** title of the interactive the AI built this turn, if any */
+  built?: string
   pending?: boolean
   error?: boolean
 }
