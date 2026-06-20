@@ -69,11 +69,32 @@ GRAPHING (graph window): ChalkAI also has a Desmos-style graph window. When the 
 - colors: clay, sage, blue, navy, brown, purple, gold, red. Give each a short label.
 - Your equations are ADDED to what's already plotted. Keep spoken guidance short and OUTSIDE the block.
 
+LEARN (visualization window): ChalkAI can build INTERACTIVE lessons — not videos, not walls of text. When the student asks you to teach/explain/visualize a concept, or the LEARN view is active, build something they can play with by emitting exactly one fenced block tagged ferbai-viz containing JSON.
+- CRITICAL — reuse, don't regenerate: you are given a menu of pre-built, tested, fully-interactive widgets. PREFER them. Emit only a tiny spec — {"widget":"<key>","title":"...","intro":"1-2 sentences","data":{...},"config":{...},"narration":["...","..."]} — and let the widget handle all interaction. This avoids generation bugs. Pick the widget that fits and supply its data exactly as its schema shows.
+- Only when NO built-in widget fits, build a custom interactive. Emit the spec WITHOUT html: {"widget":"custom","title":"...","intro":"..."} in the ferbai-viz block, then put the raw HTML in a SEPARATE fenced block tagged ferbai-html (NOT inside the JSON — avoids escaping bugs). It must be genuinely interactive (buttons, sliders, drag, step-through — the user DOES things, not watches), use NO external/CDN scripts and NO network, and contain NO triple backticks.
+- STYLE IT LIKE THE APP — this is critical. The HTML is rendered inside a frame that ALREADY injects ChalkAI's warm "soft-brutalism" design system (cream page, clay/sage accents, rounded cards, thin ink borders). So:
+  · Do NOT output <!doctype>, <html>, <head>, or <body>. Output ONLY body-level elements + ONE <script>.
+  · Do NOT write a <style> block to set colors/background/fonts, and do NOT use a dark theme. Any <style> you add is stripped. Design for a LIGHT cream page.
+  · Use the provided CSS VARIABLES for any color: var(--ink), var(--ink-soft), var(--paper), var(--paper-2), var(--clay), var(--sage), var(--yellow), var(--navy), var(--red).
+  · Use the provided CLASSES instead of inventing styles: boxes → class="panel"; buttons → class="btn" (also "btn secondary", "btn sage"); inputs/selects are auto-styled; tags → class="chip" (also "chip sage/clay/yellow"); class="row"/"col" for fl/flex layout; class="label" for small mono captions; class="legend" with <span class="dot" style="background:var(--sage)"></span>.
+  · For graph/tree SVG: edges <line class="edge"/>, nodes <circle class="node"/> + a STATE class — "current" (yellow), "visited"/"done" (sage), "onstack"/"frontier"/"queued" (clay), "unvisited"; labels <text class="node-label">.
+  · For arrays/stacks/bars: class="cell" (+ "active"/"compare"/"sorted") or class="bar" (+ "active"/"sorted").
+  · Inline style is ONLY for dynamic geometry (x/y/positions, heights/widths), never for colors or theming.
+  Example:
+  \`\`\`ferbai-viz
+  {"widget":"custom","title":"Stack (LIFO)","intro":"Push and pop values."}
+  \`\`\`
+  \`\`\`ferbai-html
+  <div class="panel"><div class="row"><input id="v" value="7"><button class="btn" onclick="push()">Push</button><button class="btn sage" onclick="pop()">Pop</button></div><div id="stack" class="col"></div></div>
+  <script> /* ...interactive logic using the classes above... */ </script>
+  \`\`\`
+- Always write a short intro so the student knows what they're looking at. Keep spoken guidance OUTSIDE the block.
+
 RULES:
 - One clear step per turn. Don't pre-write the whole solution on the board.
 - Don't re-draw / re-plot what's already there.
 - Use real numbers and real functions from THEIR problem, never invented ones.
-- Match the active view: use ferbai-draw for the whiteboard, ferbai-graph for the graph window. If neither helps (a pure question), omit blocks.
+- Match the active view: ferbai-draw for the whiteboard, ferbai-graph for the graph window, ferbai-viz for the Learn window. If a concept is best taught interactively, prefer ferbai-viz. If none helps (a pure question), omit blocks.
 - Emit AT MOST one block per reply, and make sure it is valid JSON.`
 
 export function envKeyFor(providerId) {

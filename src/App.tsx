@@ -2,18 +2,21 @@ import { useEffect, useRef, useState } from 'react'
 import Whiteboard from './components/Whiteboard'
 import Toolbar from './components/Toolbar'
 import GraphView from './components/GraphView'
+import VisualizationView from './components/viz/VisualizationView'
 import ChatPanel from './components/ChatPanel'
 import ModelSelector from './components/ModelSelector'
 import SettingsModal from './components/SettingsModal'
 import { fetchProviderStatus } from './lib/ai'
 import { DEFAULT_SELECTION } from './lib/providers'
+import { catalogForPrompt } from './lib/viz/registry'
 import { getSelection, setSelection as persistSelection } from './lib/storage'
-import type { AIAction, AIGraphEquation, ChatContext, GraphHandle, Tool, View, WhiteboardHandle } from './lib/types'
+import type { AIAction, AIGraphEquation, ChatContext, GraphHandle, Tool, View, VizHandle, VizSpec, WhiteboardHandle } from './lib/types'
 import './App.css'
 
 export default function App() {
   const wbRef = useRef<WhiteboardHandle>(null)
   const graphRef = useRef<GraphHandle>(null)
+  const vizRef = useRef<VizHandle>(null)
 
   const [view, setView] = useState<View>('board')
 
@@ -51,25 +54,33 @@ export default function App() {
   }
 
   // ---- what the chat sees / acts on, based on the active view ----
-  const getActiveImage = async (): Promise<string | null> =>
-    view === 'board' ? (wbRef.current?.getImageDataURL() ?? null) : (await graphRef.current?.getImageDataURL() ?? null)
-
-  const activeEmpty = (): boolean =>
-    view === 'board' ? (wbRef.current?.isEmpty() ?? true) : (graphRef.current?.isEmpty() ?? true)
-
-  const getContext = (): ChatContext =>
-    view === 'board'
-      ? { mode: 'board', boardMeta: wbRef.current?.getBoardMeta() ?? null }
-      : { mode: 'graph', graph: { dim: graphRef.current?.getDimension() ?? '2d', equations: graphRef.current?.getEquations() ?? [] } }
-
-  const applyDraw = (actions: AIAction[]): number => {
-    setView('board')
-    return wbRef.current?.applyAIActions(actions) ?? 0
+  const getActiveImage = async (): Promise<string | null> => {
+    if (view === 'board') return wbRef.current?.getImageDataURL() ?? null
+    if (view === 'graph') return (await graphRef.current?.getImageDataURL()) ?? null
+    return null // viz view: text context only
   }
-  const applyGraph = (eqs: AIGraphEquation[]): number => {
-    setView('graph')
-    return graphRef.current?.addEquations(eqs) ?? 0
+
+  const activeEmpty = (): boolean => {
+    if (view === 'board') return wbRef.current?.isEmpty() ?? true
+    if (view === 'graph') return graphRef.current?.isEmpty() ?? true
+    return vizRef.current?.isEmpty() ?? true
   }
+
+  const getContext = (): ChatContext => {
+    if (view === 'graph') return { mode: 'graph', graph: { dim: graphRef.current?.getDimension() ?? '2d', equations: graphRef.current?.getEquations() ?? [] } }
+    if (view === 'viz') return { mode: 'viz', viz: { current: vizRef.current?.getCurrent() ?? null, catalog: catalogForPrompt() } }
+    return { mode: 'board', boardMeta: wbRef.current?.getBoardMeta() ?? null }
+  }
+
+  const applyDraw = (actions: AIAction[]): number => { setView('board'); return wbRef.current?.applyAIActions(actions) ?? 0 }
+  const applyGraph = (eqs: AIGraphEquation[]): number => { setView('graph'); return graphRef.current?.addEquations(eqs) ?? 0 }
+  const applyViz = (spec: VizSpec): string | null => { setView('viz'); vizRef.current?.render(spec); return spec.title || spec.widget }
+
+  const TABS: { id: View; label: string }[] = [
+    { id: 'board', label: '✎ Board' },
+    { id: 'graph', label: '∿ Graph' },
+    { id: 'viz', label: '◆ Learn' },
+  ]
 
   return (
     <div className="app">
@@ -84,16 +95,14 @@ export default function App() {
           </span>
           <span className="brand__word">Chalk<span className="brand__word-ai">AI</span></span>
           <div className="viewtoggle" role="tablist" aria-label="Left panel view">
-            <button
-              className={`viewtoggle__btn ${view === 'board' ? 'is-on' : ''}`}
-              onClick={() => setView('board')}
-              role="tab" aria-selected={view === 'board'}
-            >✎ Board</button>
-            <button
-              className={`viewtoggle__btn ${view === 'graph' ? 'is-on' : ''}`}
-              onClick={() => setView('graph')}
-              role="tab" aria-selected={view === 'graph'}
-            >∿ Graph</button>
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                className={`viewtoggle__btn ${view === t.id ? 'is-on' : ''}`}
+                onClick={() => setView(t.id)}
+                role="tab" aria-selected={view === t.id}
+              >{t.label}</button>
+            ))}
           </div>
         </div>
 
@@ -105,16 +114,12 @@ export default function App() {
           <span className={`ready ${ready ? 'ready--on' : 'ready--off'}`}>
             <span className="ready__dot" /> {ready ? 'ready' : 'offline'}
           </span>
-          <button className="btn topbar__settings" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="API settings">
-            ⚙
-          </button>
+          <button className="btn topbar__settings" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="API settings">⚙</button>
         </div>
       </header>
 
       <div className="app__work">
         <section className="app__left">
-          {/* Both views stay mounted; we hide the inactive one so graph state
-              and board strokes survive toggling. */}
           <div className={`app__board ${view === 'board' ? '' : 'is-hidden'}`}>
             <Toolbar
               tool={tool} setTool={setTool}
@@ -138,6 +143,10 @@ export default function App() {
           <div className={`app__graph ${view === 'graph' ? '' : 'is-hidden'}`}>
             <GraphView ref={graphRef} />
           </div>
+
+          <div className={`app__viz ${view === 'viz' ? '' : 'is-hidden'}`}>
+            <VisualizationView ref={vizRef} />
+          </div>
         </section>
 
         <ChatPanel
@@ -148,6 +157,7 @@ export default function App() {
           getContext={getContext}
           applyDraw={applyDraw}
           applyGraph={applyGraph}
+          applyViz={applyViz}
           keysVersion={keysVersion}
         />
       </div>

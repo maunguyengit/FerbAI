@@ -90,7 +90,8 @@
 }
 .app__canvas-wrap { flex: 1; min-width: 0; display: flex; min-height: 0; }
 
-.app__graph {
+.app__graph,
+.app__viz {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -104,5 +105,5 @@
   .app__work { flex-direction: column; }
   /* stack the toolbar above the canvas so the canvas keeps its width */
   .app__board { flex-direction: column; min-height: 50vh; }
-  .app__graph { min-height: 50vh; }
+  .app__graph, .app__viz { min-height: 50vh; }
 }
