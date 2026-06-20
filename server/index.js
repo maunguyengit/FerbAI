@@ -22,7 +22,7 @@ app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
 // ---- streaming chat proxy ----
 app.post('/api/chat', async (req, res) => {
-  const { providerId, modelId, messages = [], image, clientKey, baseUrl, boardMeta, wantDraw } = req.body || {}
+  const { providerId, modelId, messages = [], image, clientKey, baseUrl, context, wantAct } = req.body || {}
   const provider = PROVIDERS[providerId]
   const model = provider?.models[modelId]
 
@@ -47,12 +47,13 @@ app.post('/api/chat', async (req, res) => {
 
   // Attach the board geometry to the latest user turn so the model can place
   // its writing accurately (where the empty space is) instead of guessing.
-  const note = boardNote(boardMeta)
-  const drawDirective = wantDraw
-    ? `\n\n[ACT ON THE BOARD: For THIS turn you MUST include exactly one ferbai-draw block that writes your next step in the empty space (do not overlap their work). Keep your spoken guidance short and outside the block.]`
-    : ''
+  const mode = context?.mode === 'graph' ? 'graph' : 'board'
+  const note = mode === 'graph' ? graphNote(context?.graph) : boardNote(context?.boardMeta)
+  const directive = !wantAct ? '' : mode === 'graph'
+    ? `\n\n[GRAPH IT: For THIS turn you MUST include exactly one ferbai-graph block with the requested function(s). Keep spoken guidance short and outside the block.]`
+    : `\n\n[ACT ON THE BOARD: For THIS turn you MUST include exactly one ferbai-draw block that writes your next step in the empty space (do not overlap their work). Keep spoken guidance short and outside the block.]`
   const turns = messages.map((m) => ({ ...m }))
-  const suffix = `${note}${drawDirective}`
+  const suffix = `${note}${directive}`
   if (suffix) {
     for (let i = turns.length - 1; i >= 0; i--) {
       if (turns[i].role === 'user') {
@@ -133,6 +134,20 @@ function boardNote(meta) {
     `EMPTY space is below (y>=${bottom + 24}) and to the right (x>=${right + 24}). ` +
     `Place your writing there — e.g. a new line at x=${content.x}, y=${belowY}, or to the right at x=${rightX}, y=${content.y}. ` +
     `Do NOT overlap the student's work.]`
+  )
+}
+
+// Compact description of the graph window for the model.
+function graphNote(graph) {
+  const dim = graph?.dim === '3d' ? '3D' : '2D'
+  const eqs = Array.isArray(graph?.equations) ? graph.equations : []
+  const list = eqs.length ? eqs.map((e) => `"${e}"`).join(', ') : 'none yet'
+  return (
+    `\n\n[GRAPH VIEW is active (${dim}). Currently plotted: ${list}. ` +
+    `To plot, emit a ferbai-graph JSON block: {"equations":[{"eq":"y=x^3+3x^2","color":"clay","label":"f"}]}. ` +
+    `Syntax: explicit y=f(x); 3D surface z=f(x,y); implicit relations like x^2+y^2+z^2=9 (uses z => 3D). ` +
+    `Use ^ for powers and * for multiplication. Compute any derivative/integral/intersection YOURSELF and emit the resulting function(s). ` +
+    `Your equations are ADDED to whatever is already plotted; only restate an existing one if asked to change it.]`
   )
 }
 

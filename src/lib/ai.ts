@@ -6,7 +6,7 @@
 // `data: {"error": "<message>"}` on failure, and `data: [DONE]` at the end.
 
 import { getApiKey, getBaseUrl } from './storage'
-import type { BoardMeta, ChatMessage } from './types'
+import type { ChatContext, ChatMessage } from './types'
 
 export class AIError extends Error {}
 
@@ -15,9 +15,10 @@ interface ChatOptions {
   modelId: string
   history: ChatMessage[]
   imageDataURL?: string | null
-  boardMeta?: BoardMeta | null
-  /** force the model to render its next step on the board this turn */
-  wantDraw?: boolean
+  /** which left-panel view is active + its content (board geometry or graph eqs) */
+  context: ChatContext
+  /** force the model to act on the active view (draw or graph) this turn */
+  wantAct?: boolean
   signal?: AbortSignal
   onToken: (delta: string) => void
 }
@@ -50,8 +51,8 @@ export async function streamChat(opts: ChatOptions): Promise<void> {
       providerId: opts.providerId,
       modelId: opts.modelId,
       image: opts.imageDataURL ?? null,
-      boardMeta: opts.boardMeta ?? null,
-      wantDraw: opts.wantDraw ?? false,
+      context: opts.context,
+      wantAct: opts.wantAct ?? false,
       clientKey,
       baseUrl,
       messages: opts.history.filter((m) => !m.error).map((m) => ({ role: m.role, text: m.text })),

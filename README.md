@@ -49,6 +49,30 @@ OpenAI-compatible groups at any gateway (OpenRouter, a self-hosted proxy, the
 real OpenCode Go endpoint, etc.). Adjust model IDs in
 [`src/lib/providers.ts`](src/lib/providers.ts) to match your gateway.
 
+## Graph window (Desmos-style 2D + 3D) the AI can plot on
+
+Toggle the left panel between **✎ Board** and **∿ Graph** (top bar). The graph
+window takes typed equations and the AI can plot onto it too.
+
+- **Type equations** in the side rail: explicit `y = x^2 + 9`, surfaces
+  `z = x^2 - y^2`, or implicit relations `x^2 + y^2 + z^2 = 9`. Anything using
+  `z` renders in **3D** (drag to rotate, scroll to zoom); otherwise **2D**.
+  Click a color dot to show/hide, double-click to recolor, `×` to delete.
+- **The AI plots too.** In the graph view, ask things like *"graph the
+  derivative and integral of y = x³ + 3x²"* or *"plot a cubic that intersects
+  this parabola"*. The model **does the calculus itself** and emits a
+  `ferbai-graph` block of equations, which the app plots (marked `✦` as
+  AI-added). It sees the current graph (snapshot + equation list) so it builds
+  on what's there.
+
+Built on [Plotly.js](https://plotly.com/javascript/) (2D lines/contours, 3D
+surfaces/isosurfaces) + [mathjs](https://mathjs.org/) (parsing/evaluation). The
+equation engine lives in [`src/lib/graph.ts`](src/lib/graph.ts); the panel in
+[`GraphView.tsx`](src/components/GraphView.tsx).
+
+> Note: bundling Plotly makes the production JS large (~5.7 MB / 1.7 MB gzip).
+> Fine for local use; code-split it (lazy-load the graph) before shipping wide.
+
 ## The AI writes ON the board (not just chat)
 
 FerbAI's tutor doesn't only talk in the sidebar — it **writes the next step onto

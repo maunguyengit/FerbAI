@@ -24,7 +24,34 @@
   letter-spacing: -0.02em;
 }
 .brand__word-ai { color: var(--color-accent); }
-.brand__tag { margin-left: var(--space-2xs); }
+
+/* board / graph toggle */
+.viewtoggle {
+  display: inline-flex;
+  background: var(--color-paper-3);
+  border: var(--rule) solid var(--color-ink);
+  border-radius: var(--radius-pill);
+  padding: 2px;
+  margin-left: var(--space-xs);
+}
+.viewtoggle__btn {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--text-sm);
+  border: none;
+  background: none;
+  color: var(--color-ink-soft);
+  padding: var(--space-2xs) var(--space-sm);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.viewtoggle__btn:hover { color: var(--color-ink); }
+.viewtoggle__btn.is-on {
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-soft);
+}
 
 .topbar__center { display: flex; justify-content: center; min-width: 0; }
 .topbar__right { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-sm); }
@@ -45,19 +72,14 @@
 .ready--on .ready__dot { background: var(--color-sage); }
 .ready--off .ready__dot { background: var(--color-ink-soft); }
 
-.topbar__settings {
-  width: 42px;
-  height: 42px;
-  padding: 0;
-  font-size: var(--text-lg);
-}
+.topbar__settings { width: 42px; height: 42px; padding: 0; font-size: var(--text-lg); }
 
-/* ---- work area: board | chat ---- */
-.app__work {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-}
+/* ---- work area: left view | chat ---- */
+.app__work { flex: 1; display: flex; min-height: 0; }
+
+.app__left { flex: 1; min-width: 0; display: flex; min-height: 0; }
+.is-hidden { display: none !important; }
+
 .app__board {
   flex: 1;
   min-width: 0;
@@ -66,16 +88,19 @@
   padding: var(--space-md);
   gap: var(--space-md);
 }
-.app__canvas-wrap {
+.app__canvas-wrap { flex: 1; min-width: 0; display: flex; min-height: 0; }
+
+.app__graph {
   flex: 1;
   min-width: 0;
   display: flex;
   min-height: 0;
+  padding: var(--space-md);
 }
 
 @media (max-width: 900px) {
   .topbar { grid-template-columns: auto 1fr auto; padding: var(--space-xs) var(--space-md); }
-  .brand__tag { display: none; }
+  .brand__word { display: none; }
   .app__work { flex-direction: column; }
-  .app__board { min-height: 50vh; }
+  .app__board, .app__graph { min-height: 50vh; }
 }

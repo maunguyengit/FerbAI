@@ -3,16 +3,17 @@ import { AIError, fetchProviderStatus, streamChat, type ProviderStatus } from '.
 import { decodeSelection, getModel, getProvider } from '../lib/providers'
 import { getApiKey } from '../lib/storage'
 import { parseReply } from '../lib/drawblock'
-import type { AIAction, BoardMeta, ChatMessage } from '../lib/types'
+import type { AIAction, AIGraphEquation, ChatContext, ChatMessage, View } from '../lib/types'
 import './ChatPanel.css'
 
 interface Props {
   selection: string
-  getBoardImage: () => string | null
-  boardEmpty: () => boolean
-  getBoardMeta: () => BoardMeta | null
-  drawOnBoard: (actions: AIAction[]) => number
-  /** bump to re-read backend key status after settings close */
+  view: View
+  getActiveImage: () => Promise<string | null>
+  activeEmpty: () => boolean
+  getContext: () => ChatContext
+  applyDraw: (actions: AIAction[]) => number
+  applyGraph: (eqs: AIGraphEquation[]) => number
   keysVersion: number
 }
 
@@ -20,12 +21,12 @@ let msgSeq = 0
 const mid = () => `m_${Date.now().toString(36)}_${msgSeq++}`
 
 export default function ChatPanel({
-  selection, getBoardImage, boardEmpty, getBoardMeta, drawOnBoard, keysVersion,
+  selection, view, getActiveImage, activeEmpty, getContext, applyDraw, applyGraph, keysVersion,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [includeBoard, setIncludeBoard] = useState(true)
-  const [aiDraws, setAiDraws] = useState(true)
+  const [aiActs, setAiActs] = useState(true)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<ProviderStatus>({})
   const abortRef = useRef<AbortController | null>(null)
@@ -36,6 +37,7 @@ export default function ChatPanel({
   const model = getModel(providerId, modelId)
   const hasKey = !!status[providerId]?.configured || !!getApiKey(providerId)
   const visionOn = !!model?.vision
+  const onGraph = view === 'graph'
 
   useEffect(() => {
     const ctrl = new AbortController()
@@ -62,7 +64,7 @@ export default function ChatPanel({
   const send = async () => {
     if (busy) return
     const text = input.trim()
-    const attach = includeBoard && visionOn && !boardEmpty()
+    const attach = includeBoard && visionOn && !activeEmpty()
     if (!text && !attach) return
 
     if (!hasKey) {
@@ -73,12 +75,12 @@ export default function ChatPanel({
       return
     }
 
-    const image = attach ? getBoardImage() : null
-    const boardMeta = getBoardMeta()
+    const image = attach ? await getActiveImage() : null
+    const context = getContext()
     const userMsg: ChatMessage = {
       id: mid(),
       role: 'user',
-      text: text || '(reading my board — what next?)',
+      text: text || (onGraph ? '(look at my graph — what next?)' : '(reading my board — what next?)'),
       image: image ?? undefined,
     }
     const assistantMsg: ChatMessage = { id: mid(), role: 'assistant', text: '', pending: true }
@@ -98,8 +100,8 @@ export default function ChatPanel({
         modelId,
         history,
         imageDataURL: image,
-        boardMeta,
-        wantDraw: aiDraws && !boardEmpty(),
+        context,
+        wantAct: aiActs,
         signal: controller.signal,
         onToken: (delta) => {
           full += delta
@@ -107,12 +109,14 @@ export default function ChatPanel({
           setMessages((m) => m.map((x) => (x.id === assistantMsg.id ? { ...x, text: clean } : x)))
         },
       })
-      const { clean, actions } = parseReply(full)
+      const { clean, actions, graph } = parseReply(full)
       let drew = 0
-      if (actions && actions.length) drew = drawOnBoard(actions)
-      const finalText = clean || (drew ? '✎ Added that to your board.' : '')
+      let graphed = 0
+      if (actions && actions.length) drew = applyDraw(actions)
+      if (graph && graph.length) graphed = applyGraph(graph)
+      const fallback = drew ? '✎ Added that to your board.' : graphed ? '∿ Plotted that on the graph.' : ''
       setMessages((m) =>
-        m.map((x) => (x.id === assistantMsg.id ? { ...x, text: finalText, drew, pending: false } : x)),
+        m.map((x) => (x.id === assistantMsg.id ? { ...x, text: clean || fallback, drew, graphed, pending: false } : x)),
       )
     } catch (err) {
       const message = err instanceof AIError ? err.message
@@ -160,11 +164,11 @@ export default function ChatPanel({
       <div className="chat__log" ref={scrollRef}>
         {messages.length === 0 && (
           <div className="chat__intro">
-            <p className="chat__intro-big">Draw a problem.<br />I read the board.<br />I write the next step <b>on it</b>.</p>
+            <p className="chat__intro-big">Draw it or graph it.<br />I see it. I work <b>on it</b>.</p>
             <ul className="chat__intro-list">
-              <li>Sketch your math, diagram, or plan on the left.</li>
-              <li>Pick a <b>vision</b> model up top so I can see the board.</li>
-              <li>Hit <b>Send</b> — I'll guide you <i>and</i> draw the next step in the empty space.</li>
+              <li><b>Board:</b> sketch a problem — I write the next step on it.</li>
+              <li><b>Graph:</b> ask "plot the derivative of x³+3x²" or "graph x²+y²+z²=9" — I plot it.</li>
+              <li>Pick a <b>vision</b> model up top so I can see the {onGraph ? 'graph' : 'board'}.</li>
             </ul>
           </div>
         )}
@@ -174,9 +178,7 @@ export default function ChatPanel({
             {m.role === 'assistant' && <span className="msg__avatar" aria-hidden>✦</span>}
             <div className="msg__col">
               {m.image && (
-                <figure className="msg__snap">
-                  <img src={m.image} alt="board snapshot" />
-                </figure>
+                <figure className="msg__snap"><img src={m.image} alt="snapshot" /></figure>
               )}
               {(m.text || m.pending) && (
                 <div className="msg__bubble">
@@ -186,7 +188,10 @@ export default function ChatPanel({
                 </div>
               )}
               {!m.pending && !!m.drew && (
-                <span className="msg__drew">✎ drew {m.drew} thing{m.drew > 1 ? 's' : ''} on the board</span>
+                <span className="msg__act">✎ drew {m.drew} thing{m.drew > 1 ? 's' : ''} on the board</span>
+              )}
+              {!m.pending && !!m.graphed && (
+                <span className="msg__act">∿ plotted {m.graphed} function{m.graphed > 1 ? 's' : ''}</span>
               )}
             </div>
           </div>
@@ -197,18 +202,18 @@ export default function ChatPanel({
         <div className="chat__toggles">
           <label className={`toggle ${!visionOn ? 'toggle--off' : ''}`}>
             <input type="checkbox" checked={includeBoard} onChange={(e) => setIncludeBoard(e.target.checked)} disabled={!visionOn} />
-            <span>{visionOn ? 'board snapshot attached' : 'model has no vision'}</span>
+            <span>{visionOn ? `${onGraph ? 'graph' : 'board'} snapshot attached` : 'model has no vision'}</span>
           </label>
           <label className="toggle">
-            <input type="checkbox" checked={aiDraws} onChange={(e) => setAiDraws(e.target.checked)} />
-            <span>✎ AI draws on board</span>
+            <input type="checkbox" checked={aiActs} onChange={(e) => setAiActs(e.target.checked)} />
+            <span>{onGraph ? '∿ AI plots on graph' : '✎ AI draws on board'}</span>
           </label>
         </div>
         <div className="chat__inputrow">
           <textarea
             className="chat__input"
             value={input}
-            placeholder="Ask about what's on the board…"
+            placeholder={onGraph ? 'Ask me to graph something…' : "Ask about what's on the board…"}
             rows={2}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
