@@ -1,5 +1,5 @@
 // ---------- Whiteboard ----------
-export type Tool = 'pen' | 'eraser' | 'lasso' | 'text' | 'rect' | 'ellipse'
+export type Tool = 'pen' | 'eraser' | 'lasso' | 'text' | 'rect' | 'ellipse' | 'pan'
 
 export type Author = 'user' | 'ai'
 

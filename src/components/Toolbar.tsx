@@ -23,6 +23,7 @@ const TOOLS: { id: Tool; label: string; glyph: string; key: string }[] = [
   { id: 'text', label: 'Text', glyph: 'T', key: 'T' },
   { id: 'rect', label: 'Box', glyph: '▭', key: 'R' },
   { id: 'ellipse', label: 'Oval', glyph: '◯', key: 'O' },
+  { id: 'pan', label: 'Pan', glyph: '✋', key: 'H' },
 ]
 
 const SWATCHES = [
