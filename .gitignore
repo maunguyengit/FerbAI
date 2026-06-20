@@ -6,3 +6,7 @@ dist-ssr
 .DS_Store
 .vite
 .env.example
+
+# TS build artifact
+*.tsbuildinfo
+tsconfig.tsbuildinfo
