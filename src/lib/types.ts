@@ -1,5 +1,5 @@
 // ---------- Whiteboard ----------
-export type Tool = 'pen' | 'eraser' | 'lasso' | 'text' | 'rect' | 'ellipse'
+export type Tool = 'pen' | 'eraser' | 'lasso' | 'text' | 'rect' | 'ellipse' | 'pan'
 
 export type Author = 'user' | 'ai'
 
@@ -76,6 +76,48 @@ export interface WhiteboardHandle {
   clear: () => void
 }
 
+// ---------- Graph ----------
+export type GraphDim = '2d' | '3d'
+
+/** One equation/relation on the graph. */
+export interface GraphEquation {
+  id: string
+  raw: string
+  color: string
+  visible: boolean
+  author?: Author
+  error?: string | null
+}
+
+/** A graph instruction the AI emits (in a `ferbai-graph` block). */
+export interface AIGraphEquation {
+  eq: string
+  color?: string
+  label?: string
+}
+
+export interface GraphHandle {
+  /** PNG snapshot of the current plot (async — Plotly renders to image). */
+  getImageDataURL: () => Promise<string | null>
+  isEmpty: () => boolean
+  /** raw equation strings currently plotted, for the AI's context */
+  getEquations: () => string[]
+  /** '2d' unless any equation references z */
+  getDimension: () => GraphDim
+  /** add AI-authored equations to the plot; returns count added */
+  addEquations: (eqs: AIGraphEquation[]) => number
+}
+
+// ---------- Left-panel view ----------
+export type View = 'board' | 'graph'
+
+/** What the chat sends to the AI about the active left-panel view. */
+export interface ChatContext {
+  mode: View
+  boardMeta?: BoardMeta | null
+  graph?: { dim: GraphDim; equations: string[] }
+}
+
 // ---------- Chat ----------
 export type Role = 'user' | 'assistant'
 
@@ -87,6 +129,8 @@ export interface ChatMessage {
   image?: string
   /** number of elements the AI drew on the board for this turn */
   drew?: number
+  /** number of equations the AI plotted on the graph for this turn */
+  graphed?: number
   pending?: boolean
   error?: boolean
 }

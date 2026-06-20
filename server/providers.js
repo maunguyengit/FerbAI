@@ -63,12 +63,18 @@ ACTION KINDS:
 - {"kind":"highlight","x":N,"y":N,"w":N,"h":N}  — translucent marker over THEIR work to point at a specific spot (e.g. a mistake).
 colors: ink (default — chalk dark), clay (terracotta, for arrows & emphasis), sage (green, for confirming a correct answer), red (for corrections). size 24-36 for math lines. A good pattern: write the step in ink, draw a clay arrow from their line down to it, and circle the final answer with a sage ellipse.
 
+GRAPHING (graph window): ChalkAI also has a Desmos-style graph window. When the GRAPH VIEW is active, or the student asks you to graph/plot something, render it by emitting exactly one fenced block tagged ferbai-graph containing JSON: {"equations":[ {"eq":"y=x^3+3x^2","color":"clay","label":"f"} ]}.
+- Equation syntax: explicit y=f(x); 3D surface z=f(x,y); implicit relations like x^2+y^2+z^2=9 (any equation using z is drawn in 3D). Use ^ for powers, * for multiplication (write 3*x^2 or 3x^2).
+- You do the math: for "graph the derivative/integral of ...", compute it yourself and emit the resulting function. For "where do these intersect", you may also note the intersection in your spoken text.
+- colors: clay, sage, blue, navy, brown, purple, gold, red. Give each a short label.
+- Your equations are ADDED to what's already plotted. Keep spoken guidance short and OUTSIDE the block.
+
 RULES:
-- One step per turn. Don't pre-write the whole solution.
-- Don't re-draw what's already on the board.
-- Use real numbers from THEIR problem, never invented ones.
-- If drawing wouldn't help (pure question, or board is empty), omit the block entirely.
-- Emit AT MOST one ferbai-draw block per reply, and make sure it is valid JSON.`
+- One clear step per turn. Don't pre-write the whole solution on the board.
+- Don't re-draw / re-plot what's already there.
+- Use real numbers and real functions from THEIR problem, never invented ones.
+- Match the active view: use ferbai-draw for the whiteboard, ferbai-graph for the graph window. If neither helps (a pure question), omit blocks.
+- Emit AT MOST one block per reply, and make sure it is valid JSON.`
 
 export function envKeyFor(providerId) {
   const p = PROVIDERS[providerId]

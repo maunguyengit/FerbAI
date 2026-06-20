@@ -114,7 +114,7 @@
 
 .msg__text { margin: 0; font-size: var(--text-sm); line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 
-.msg__drew {
+.msg__act {
   display: inline-block;
   font-family: var(--font-mono);
   font-size: 0.62rem;

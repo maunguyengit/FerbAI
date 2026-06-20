@@ -1,17 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import Whiteboard from './components/Whiteboard'
 import Toolbar from './components/Toolbar'
+import GraphView from './components/GraphView'
 import ChatPanel from './components/ChatPanel'
 import ModelSelector from './components/ModelSelector'
 import SettingsModal from './components/SettingsModal'
 import { fetchProviderStatus } from './lib/ai'
 import { DEFAULT_SELECTION } from './lib/providers'
 import { getSelection, setSelection as persistSelection } from './lib/storage'
-import type { Tool, WhiteboardHandle } from './lib/types'
+import type { AIAction, AIGraphEquation, ChatContext, GraphHandle, Tool, View, WhiteboardHandle } from './lib/types'
 import './App.css'
 
 export default function App() {
   const wbRef = useRef<WhiteboardHandle>(null)
+  const graphRef = useRef<GraphHandle>(null)
+
+  const [view, setView] = useState<View>('board')
 
   const [tool, setTool] = useState<Tool>('pen')
   const [color, setColor] = useState('oklch(27% 0.008 70)')
@@ -24,11 +28,8 @@ export default function App() {
   const [keysVersion, setKeysVersion] = useState(0)
   const [ready, setReady] = useState(false)
 
-  useEffect(() => {
-    persistSelection(selection)
-  }, [selection])
+  useEffect(() => { persistSelection(selection) }, [selection])
 
-  // backend reachability → the "ready" pill in the top bar
   useEffect(() => {
     const ctrl = new AbortController()
     fetchProviderStatus(ctrl.signal).then((s) => setReady(Object.keys(s).length > 0))
@@ -49,6 +50,27 @@ export default function App() {
     setKeysVersion((v) => v + 1)
   }
 
+  // ---- what the chat sees / acts on, based on the active view ----
+  const getActiveImage = async (): Promise<string | null> =>
+    view === 'board' ? (wbRef.current?.getImageDataURL() ?? null) : (await graphRef.current?.getImageDataURL() ?? null)
+
+  const activeEmpty = (): boolean =>
+    view === 'board' ? (wbRef.current?.isEmpty() ?? true) : (graphRef.current?.isEmpty() ?? true)
+
+  const getContext = (): ChatContext =>
+    view === 'board'
+      ? { mode: 'board', boardMeta: wbRef.current?.getBoardMeta() ?? null }
+      : { mode: 'graph', graph: { dim: graphRef.current?.getDimension() ?? '2d', equations: graphRef.current?.getEquations() ?? [] } }
+
+  const applyDraw = (actions: AIAction[]): number => {
+    setView('board')
+    return wbRef.current?.applyAIActions(actions) ?? 0
+  }
+  const applyGraph = (eqs: AIGraphEquation[]): number => {
+    setView('graph')
+    return graphRef.current?.addEquations(eqs) ?? 0
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -61,7 +83,18 @@ export default function App() {
             </svg>
           </span>
           <span className="brand__word">Chalk<span className="brand__word-ai">AI</span></span>
-          <span className="brand__tag caption">draw · learn</span>
+          <div className="viewtoggle" role="tablist" aria-label="Left panel view">
+            <button
+              className={`viewtoggle__btn ${view === 'board' ? 'is-on' : ''}`}
+              onClick={() => setView('board')}
+              role="tab" aria-selected={view === 'board'}
+            >✎ Board</button>
+            <button
+              className={`viewtoggle__btn ${view === 'graph' ? 'is-on' : ''}`}
+              onClick={() => setView('graph')}
+              role="tab" aria-selected={view === 'graph'}
+            >∿ Graph</button>
+          </div>
         </div>
 
         <div className="topbar__center">
@@ -79,38 +112,42 @@ export default function App() {
       </header>
 
       <div className="app__work">
-        <section className="app__board">
-          <Toolbar
-            tool={tool}
-            setTool={setTool}
-            color={color}
-            setColor={setColor}
-            width={width}
-            setWidth={setWidth}
-            canUndo={canUndo}
-            canRedo={canRedo}
-            onUndo={() => wbRef.current?.undo()}
-            onRedo={() => wbRef.current?.redo()}
-            onClear={() => wbRef.current?.clear()}
-            onDownload={download}
-          />
-          <div className="app__canvas-wrap">
-            <Whiteboard
-              ref={wbRef}
-              tool={tool}
-              color={color}
-              width={width}
-              onHistoryChange={(u, r) => { setCanUndo(u); setCanRedo(r) }}
+        <section className="app__left">
+          {/* Both views stay mounted; we hide the inactive one so graph state
+              and board strokes survive toggling. */}
+          <div className={`app__board ${view === 'board' ? '' : 'is-hidden'}`}>
+            <Toolbar
+              tool={tool} setTool={setTool}
+              color={color} setColor={setColor}
+              width={width} setWidth={setWidth}
+              canUndo={canUndo} canRedo={canRedo}
+              onUndo={() => wbRef.current?.undo()}
+              onRedo={() => wbRef.current?.redo()}
+              onClear={() => wbRef.current?.clear()}
+              onDownload={download}
             />
+            <div className="app__canvas-wrap">
+              <Whiteboard
+                ref={wbRef}
+                tool={tool} color={color} width={width}
+                onHistoryChange={(u, r) => { setCanUndo(u); setCanRedo(r) }}
+              />
+            </div>
+          </div>
+
+          <div className={`app__graph ${view === 'graph' ? '' : 'is-hidden'}`}>
+            <GraphView ref={graphRef} />
           </div>
         </section>
 
         <ChatPanel
           selection={selection}
-          getBoardImage={() => wbRef.current?.getImageDataURL() ?? null}
-          boardEmpty={() => wbRef.current?.isEmpty() ?? true}
-          getBoardMeta={() => wbRef.current?.getBoardMeta() ?? null}
-          drawOnBoard={(actions) => wbRef.current?.applyAIActions(actions) ?? 0}
+          view={view}
+          getActiveImage={getActiveImage}
+          activeEmpty={activeEmpty}
+          getContext={getContext}
+          applyDraw={applyDraw}
+          applyGraph={applyGraph}
           keysVersion={keysVersion}
         />
       </div>

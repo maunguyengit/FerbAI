@@ -1,0 +1,118 @@
+.graph {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  min-height: 0;
+  background: var(--color-paper-2);
+  border: var(--rule-thick) solid var(--color-ink);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+
+/* ---- equation side rail ---- */
+.graph__side {
+  width: 280px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: var(--rule) solid var(--color-ink);
+  background: var(--color-paper);
+}
+.graph__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: var(--rule) solid var(--color-ink);
+}
+.graph__title { font-size: var(--text-lg); font-weight: 800; }
+.graph__clear {
+  background: none; border: none; cursor: pointer;
+  font-family: var(--font-body); font-weight: 600; font-size: var(--text-sm);
+  color: var(--color-ink); padding: var(--space-2xs) var(--space-xs); border-radius: var(--radius-sm);
+}
+.graph__clear:hover { background: var(--color-paper-3); color: var(--color-accent); }
+
+.graph__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.eqrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-2xs) var(--space-xs);
+  border: var(--rule) solid transparent;
+  border-radius: var(--radius);
+  background: var(--color-paper-2);
+  flex-wrap: wrap;
+}
+.eqrow:focus-within { border-color: var(--color-ink); }
+.eqrow--err { border-color: var(--color-red); }
+.eqrow--add { background: transparent; }
+
+.eqrow__dot {
+  width: 18px; height: 18px; flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--color-ink);
+  cursor: pointer; padding: 0;
+}
+.eqrow__plus {
+  width: 18px; text-align: center; color: var(--color-ink-soft); font-weight: 700;
+}
+.eqrow__input {
+  flex: 1; min-width: 0;
+  border: none; background: transparent; outline: none;
+  font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-ink);
+  padding: 2px 0;
+}
+.eqrow__input::placeholder { color: var(--color-ink-soft); }
+.eqrow__ai { color: var(--color-accent); font-size: var(--text-sm); }
+.eqrow__del {
+  flex: none; border: none; background: none; cursor: pointer;
+  color: var(--color-ink-soft); font-size: var(--text-lg); line-height: 1; padding: 0 2px;
+}
+.eqrow__del:hover { color: var(--color-red); }
+.eqrow__msg {
+  width: 100%;
+  font-family: var(--font-mono); font-size: 0.62rem;
+  color: var(--color-red); padding-left: 26px;
+}
+
+.graph__samples {
+  display: flex; flex-wrap: wrap; gap: var(--space-2xs);
+  align-items: center; margin-top: var(--space-sm);
+}
+.graph__samples .caption { width: 100%; margin-bottom: 2px; }
+.graph__sample {
+  font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 700;
+  border: var(--rule) solid var(--color-ink); border-radius: var(--radius-pill);
+  background: var(--color-paper-2); color: var(--color-ink);
+  padding: 3px 10px; cursor: pointer;
+}
+.graph__sample:hover { background: var(--color-accent); color: var(--color-accent-ink); border-color: var(--color-accent); }
+
+.graph__hint {
+  padding: var(--space-xs) var(--space-md);
+  border-top: var(--rule) solid var(--color-ink);
+  line-height: 1.5;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ---- plot area ---- */
+.graph__plot { flex: 1; min-width: 0; min-height: 0; }
+.graph__plot .plotly, .graph__plot .plot-container { width: 100% !important; height: 100% !important; }
+
+@media (max-width: 900px) {
+  .graph { flex-direction: column; }
+  .graph__side { width: 100%; border-right: none; border-bottom: var(--rule) solid var(--color-ink); max-height: 40%; }
+}
