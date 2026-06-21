@@ -157,11 +157,34 @@ instead of straight from the browser. That buys you three things:
 The proxy never persists anything — `.env` keys are read at start, UI-pasted keys
 are used for that one request and discarded.
 
-## Semantic memory embeddings
+## Two-agent memory and review loop
 
-FerbAI can recall similar past tutoring sessions by storing session-summary
-embeddings in Redis Stack vector indexes. The default local setup uses RedisVL
-with Hugging Face Sentence Transformers, so there are no embedding API costs:
+FerbAI now keeps a lightweight two-agent tutoring loop:
+
+1. **Agent 1 — the tutor.** This is the chat model that sees the board/graph/learn
+   context, answers the student, and can emit `ferbai-draw`, `ferbai-graph`, or
+   `ferbai-viz` blocks for the app to render. Every turn is written as a memory
+   event (`user_message_received`, `assistant_response_started`,
+   `assistant_response_completed`, tool results, and failures).
+2. **Agent 2 — the reviewer.** The **Review** button runs a local heuristic tutor
+   evaluator ([`server/tutorReview.js`](server/tutorReview.js)) over the transcript,
+   board state, and lesson goal. It scores engagement, diagnosis, scaffolding,
+   board grounding, tone, and goal alignment, then writes its risks and
+   recommendations back into memory as Agent 2 review summaries.
+
+Before each Agent 1 response, the backend builds a memory packet for the current
+session ([`getAgentMemoryPacket`](server/memory.js)): recent events, the current
+session summary, Agent 2 guidance, and semantically similar prior sessions for
+that same user. Agent 2 notes are injected as advisory coaching context so the
+tutor can adapt without exposing the memory block to the student.
+
+## Redis memory, vector search, and embedding cache
+
+FerbAI can recall similar past tutoring sessions by storing session events,
+session state, review summaries, and session-summary embeddings in Redis. With
+Redis Stack enabled, summary embeddings are also written to a vector index for
+semantic retrieval. The default local setup uses RedisVL with Hugging Face
+Sentence Transformers, so there are no embedding API costs:
 
 ```bash
 pip install -r requirements.txt
@@ -173,6 +196,9 @@ Set these in `.env`:
 MEMORY_EMBEDDINGS_BACKEND=redisvl-hf
 MEMORY_HF_MODEL=sentence-transformers/all-MiniLM-L6-v2
 MEMORY_EMBEDDING_TIMEOUT_MS=120000
+MEMORY_EMBEDDING_WORKER_START_TIMEOUT_MS=120000
+MEMORY_EMBEDDING_CACHE_TTL_SECONDS=604800
+MEMORY_EMBEDDING_MEMORY_CACHE_LIMIT=500
 PYTHON_BIN=python
 ```
 
@@ -183,6 +209,18 @@ spawning Python for every request. Embeddings are cached by text hash in-process
 and, when Redis is configured, under a TTL-backed Redis key before being stored
 as 384-dim `FLOAT32` cosine vectors in Redis Stack, e.g.
 `ferbai_summary_vector_idx_384`.
+
+Redis keys are scoped by session and user:
+
+- `ferbai:memory:session:<sessionId>:events` — recent raw memory events.
+- `ferbai:memory:session:<sessionId>:state` — current session summary, status,
+  preferences, entities, decisions, and Agent 2 reviews.
+- `ferbai:memory:user:<userId>:summary_embeddings` — per-user semantic summary
+  records used for fallback cosine search.
+- `ferbai:vector:summary:<dims>:<recordId>` — Redis Stack vector documents,
+  filtered by `userId` before vector KNN search.
+- `ferbai:memory:embedding_cache:<sha256>` — cached embeddings keyed by backend,
+  model, and normalized text.
 
 If local embeddings fail, FerbAI still saves normal session events and summaries.
 You can optionally configure `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY`, and
