@@ -6,18 +6,25 @@ interface Props {
   elements: Element[]
   /** stable world-bounds of the whole recording, so the camera never jumps */
   bounds: { x: number; y: number; w: number; h: number } | null
+  /** AI "ask" annotations drawn over the frozen board (blue), with a fade alpha */
+  annotations?: Element[]
+  annotationAlpha?: number
 }
 
 const GRID = 'oklch(87% 0.012 88)'
 const GRID_AXIS = 'oklch(80% 0.014 88)'
 
-export default function PlaybackCanvas({ elements, bounds }: Props) {
+export default function PlaybackCanvas({ elements, bounds, annotations, annotationAlpha = 1 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sizeRef = useRef({ w: 0, h: 0 })
   const camRef = useRef({ s: 1, px: 0, py: 0 })
   const elementsRef = useRef<Element[]>(elements)
   elementsRef.current = elements
+  const annRef = useRef<Element[] | undefined>(annotations)
+  annRef.current = annotations
+  const annAlphaRef = useRef(annotationAlpha)
+  annAlphaRef.current = annotationAlpha
 
   const recomputeCamera = () => {
     const { w, h } = sizeRef.current
@@ -61,6 +68,14 @@ export default function PlaybackCanvas({ elements, bounds }: Props) {
     ctx.stroke()
 
     drawAll(ctx, elementsRef.current)
+
+    // AI "ask" annotations on top, in blue, with fade alpha
+    const anns = annRef.current
+    if (anns && anns.length) {
+      ctx.globalAlpha = annAlphaRef.current
+      drawAll(ctx, anns)
+      ctx.globalAlpha = 1
+    }
   }
 
   // size to container
@@ -89,8 +104,8 @@ export default function PlaybackCanvas({ elements, bounds }: Props) {
   // recompute camera when the recording (bounds) changes
   useEffect(() => { recomputeCamera(); draw() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [bounds])
 
-  // redraw whenever the visible elements change
-  useEffect(() => { draw() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [elements])
+  // redraw whenever the visible elements or annotations change
+  useEffect(() => { draw() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [elements, annotations, annotationAlpha])
 
   return (
     <div className="pbcanvas" ref={wrapRef}>

@@ -74,6 +74,9 @@
 
 .topbar__settings { width: 42px; height: 42px; padding: 0; font-size: var(--text-lg); }
 .topbar__signout { width: 42px; height: 42px; padding: 0; font-size: var(--text-lg); }
+.topbar__chat { font-weight: 600; white-space: nowrap; }
+.topbar__chat.is-on { background: var(--color-accent); color: var(--color-accent-ink); border-color: var(--color-accent); }
+.topbar__chat.is-on:hover { background: oklch(57% 0.12 42); }
 
 /* ---- work area: left view | chat ---- */
 .app__work { flex: 1; display: flex; min-height: 0; }

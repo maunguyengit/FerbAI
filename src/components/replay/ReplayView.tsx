@@ -3,8 +3,23 @@ import PlaybackStage from './PlaybackStage'
 import ChapterThumb from './ChapterThumb'
 import { sceneAt, EMPTY_SCENE, type Recording, type Scene } from '../../lib/recording/types'
 import { contentBoundsOf } from '../../lib/render'
+import { snapshotScene } from '../../lib/recording/snapshot'
+import { startLive, type LiveSession } from '../../lib/deepgram/live'
+import { askStream, speak, speakableText, toBlueAnnotations, AskError } from '../../lib/ask'
+import { parseReply } from '../../lib/drawblock'
 import type { Element } from '../../lib/types'
 import './ReplayView.css'
+
+type AskState = 'idle' | 'listening' | 'thinking' | 'answering'
+
+// Render the AI answer with **bold** shown as real bold instead of literal stars.
+function richText(text: string) {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
+    part.startsWith('**') && part.endsWith('**')
+      ? <strong key={i}>{part.slice(2, -2)}</strong>
+      : <span key={i}>{part}</span>,
+  )
+}
 
 interface Props {
   recordings: Recording[]
@@ -130,11 +145,131 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, sel
     setCurMs(clamped); applyAt(clamped)
   }
 
+  // ───────────── ask the recording ─────────────
+  const [askState, setAskState] = useState<AskState>('idle')
+  const [askQ, setAskQ] = useState('')
+  const [askAnswer, setAskAnswer] = useState('')
+  const [askAnns, setAskAnns] = useState<Element[]>([])
+  const [annAlpha, setAnnAlpha] = useState(1)
+  const [askErr, setAskErr] = useState<string | null>(null)
+  const [talking, setTalking] = useState(false) // mic actively recording the question
+  const [speaking, setSpeaking] = useState(false) // TTS voice currently playing
+  const sttRef = useRef<LiveSession | null>(null)
+  const sttStreamRef = useRef<MediaStream | null>(null)
+  const qFinalsRef = useRef('')
+  const askAbortRef = useRef<AbortController | null>(null)
+  const ttsRef = useRef<HTMLAudioElement | null>(null)
+  const ttsUrlRef = useRef<string | null>(null)
+  const fadeRafRef = useRef<number | null>(null)
+
+  const stopStt = () => {
+    try { sttRef.current?.stop() } catch { /* */ }
+    sttStreamRef.current?.getTracks().forEach((t) => t.stop())
+    sttRef.current = null; sttStreamRef.current = null
+    setTalking(false)
+  }
+  const stopTts = () => {
+    try { ttsRef.current?.pause() } catch { /* */ }
+    if (ttsUrlRef.current) { URL.revokeObjectURL(ttsUrlRef.current); ttsUrlRef.current = null }
+    ttsRef.current = null
+    setSpeaking(false)
+  }
+
+  // Open the ask panel WITHOUT recording — the student types, or presses Talk.
+  const startAsk = () => {
+    if (!rec || askState !== 'idle') return
+    doPause()
+    setAskErr(null); setAskQ(''); qFinalsRef.current = ''; setAskAnswer(''); setAskAnns([]); setAnnAlpha(1)
+    setAskState('listening')
+  }
+
+  // Talk button: only now do we open the mic and stream live transcription in.
+  const toggleTalk = async () => {
+    if (talking) { stopStt(); return }
+    setAskErr(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      sttStreamRef.current = stream
+      sttRef.current = await startLive(stream, {
+        onPartial: (t) => setAskQ((qFinalsRef.current + ' ' + t).trim()),
+        onFinal: (t) => { qFinalsRef.current = (qFinalsRef.current + ' ' + t).trim(); setAskQ(qFinalsRef.current) },
+        onError: () => { setAskErr('Voice error — you can type your question instead.'); stopStt() },
+      })
+      setTalking(true)
+    } catch {
+      setAskErr('Mic unavailable — type your question below.')
+      setTalking(false)
+    }
+  }
+
+  const sendQuestion = async () => {
+    if (!rec) return
+    stopStt()
+    const question = askQ.trim()
+    if (!question) { setAskErr('Type or speak a question first.'); return }
+    setAskState('thinking'); setAskAnswer(''); setAskErr(null)
+
+    const sc = sceneAt(rec, curMs)
+    const snap = sc.view === 'board' ? snapshotScene(sc.elements) : null
+    const win = transcript.filter((w) => w.start >= curMs - 30000 && w.start <= curMs + 30000).map((w) => w.w).join(' ')
+
+    const controller = new AbortController()
+    askAbortRef.current = controller
+    let full = ''
+    try {
+      await askStream({
+        image: snap?.dataUrl ?? null, transcriptWindow: win, question, signal: controller.signal,
+        onToken: (d) => { full += d; setAskAnswer(parseReply(full).clean) },
+      })
+      const { clean, actions } = parseReply(full)
+      setAskAnswer(clean)
+      if (actions?.length && snap) setAskAnns(toBlueAnnotations(actions, snap))
+      setAskState('answering')
+      if (clean) {
+        const url = await speak(speakableText(clean), controller.signal)
+        if (url) {
+          ttsUrlRef.current = url
+          const a = new Audio(url); ttsRef.current = a
+          a.onended = () => setSpeaking(false)
+          a.play().then(() => setSpeaking(true)).catch(() => setSpeaking(false))
+        }
+      }
+    } catch (e) {
+      setAskErr(e instanceof AskError ? e.message : 'Could not get an answer.')
+      setAskState('answering')
+    }
+  }
+
+  const resumeFromAsk = () => {
+    stopTts()
+    // fade the blue annotations out, then clear
+    if (fadeRafRef.current) cancelAnimationFrame(fadeRafRef.current)
+    const start = performance.now(); const DUR = 450
+    const fade = (now: number) => {
+      const p = Math.min(1, (now - start) / DUR)
+      setAnnAlpha(1 - p)
+      if (p < 1) fadeRafRef.current = requestAnimationFrame(fade)
+      else { setAskAnns([]); setAnnAlpha(1) }
+    }
+    fadeRafRef.current = requestAnimationFrame(fade)
+    setAskState('idle'); setAskQ(''); setAskAnswer('')
+    doPlay()
+  }
+
+  const cancelAsk = () => {
+    stopStt(); stopTts()
+    try { askAbortRef.current?.abort() } catch { /* */ }
+    setAskAnns([]); setAnnAlpha(1); setAskState('idle'); setAskQ(''); setAskAnswer(''); setAskErr(null)
+  }
+
   // load a recording (+ resolve its audio source)
   useEffect(() => {
     stopLoop(); playingRef.current = false; setPlaying(false)
     virt.current = { playing: false, base: 0, wall: 0 }
     lastCountRef.current = -1; setCurMs(0); setShareLink(null); setAudioSrc(null)
+    // reset any in-flight ask when switching recordings
+    stopStt(); stopTts()
+    setAskState('idle'); setAskQ(''); setAskAnswer(''); setAskAnns([]); setAnnAlpha(1); setAskErr(null)
     if (rec) {
       setScene(sceneAt(rec, 0))
       resolveAudio(rec).then((src) => setAudioSrc(src))
@@ -142,6 +277,22 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, sel
     return stopLoop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rec?.id])
+
+  // "Ask" hotkey: A to ask, Escape to cancel
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tgt = e.target as HTMLElement
+      if (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA') return
+      if (e.key.toLowerCase() === 'a' && !e.ctrlKey && !e.metaKey && !e.altKey && askState === 'idle' && rec) { e.preventDefault(); startAsk() }
+      else if (e.key === 'Escape' && askState !== 'idle') { e.preventDefault(); cancelAsk() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [askState, rec?.id])
+
+  // cleanup on unmount
+  useEffect(() => () => { stopStt(); stopTts(); if (fadeRafRef.current) cancelAnimationFrame(fadeRafRef.current) }, [])
 
   // explicit select request from the app (just-recorded, or newest on login).
   // apply only when selectId actually changes, so it doesn't fight manual clicks.
@@ -225,8 +376,9 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, sel
         {rec ? (
           <>
             <div className="replay__stage">
-              <PlaybackStage scene={scene} boardBounds={bounds} />
-              {caption && <div className="replay__caption">{caption}</div>}
+              <PlaybackStage scene={scene} boardBounds={bounds} annotations={askAnns} annotationAlpha={annAlpha} />
+              {askState !== 'idle' && <span className="replay__frozen">⏸ frozen</span>}
+              {caption && askState === 'idle' && <div className="replay__caption">{caption}</div>}
               {audioSrc && <audio ref={audioRef} src={audioSrc} preload="auto" onEnded={() => doPause(true)} />}
             </div>
             <div className="replay__transport">
@@ -235,10 +387,59 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, sel
               <input className="replay__scrub" type="range" min={0} max={duration} step={50}
                 value={Math.min(curMs, duration)} onChange={(e) => seekTo(Number(e.target.value))} aria-label="seek" />
               <span className="replay__time caption">{fmt(duration)}</span>
+              {askState === 'idle' && (
+                <button className="btn btn--accent replay__ask" onClick={startAsk} title="Pause and ask a question (A)">✦ Ask</button>
+              )}
               {canShare && rec.mine && (
                 <button className="btn replay__share" onClick={doShare} title="Share this recording">⇪ Share</button>
               )}
             </div>
+
+            {askState !== 'idle' && (
+              <div className="replay__askpanel">
+                {askState === 'listening' && (
+                  <>
+                    <div className="replay__askhead">
+                      {talking ? <><span className="replay__asklive">●</span> Listening… press Stop when done</> : <>✦ Ask your question — type, or press Talk</>}
+                    </div>
+                    <input
+                      className="replay__askinput"
+                      value={askQ}
+                      autoFocus
+                      placeholder="e.g. why did you take the square root of both sides?"
+                      onChange={(e) => { qFinalsRef.current = e.target.value; setAskQ(e.target.value) }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && askQ.trim()) sendQuestion() }}
+                    />
+                    <div className="replay__askbtns">
+                      <button className={`btn ${talking ? 'btn--danger' : ''}`} onClick={toggleTalk} title="Record your voice">
+                        {talking ? '■ Stop talking' : '🎙 Talk'}
+                      </button>
+                      <button className="btn btn--accent" onClick={sendQuestion} disabled={!askQ.trim()}>Ask the AI →</button>
+                      <button className="btn" onClick={cancelAsk}>Cancel</button>
+                    </div>
+                  </>
+                )}
+                {askState === 'thinking' && (
+                  <>
+                    <div className="replay__askhead">✦ Thinking…</div>
+                    <p className="replay__askq">“{askQ}”</p>
+                    {askAnswer && <div className="replay__askans">{richText(askAnswer)}</div>}
+                  </>
+                )}
+                {askState === 'answering' && (
+                  <>
+                    <div className="replay__askhead">✦ AI assistant{askAnns.length ? ' · drew on the board in blue' : ''}</div>
+                    <p className="replay__askq">“{askQ}”</p>
+                    <div className="replay__askans">{richText(askAnswer)}</div>
+                    <div className="replay__askbtns">
+                      <button className="btn btn--accent" onClick={resumeFromAsk}>▶ Resume</button>
+                      {speaking && <button className="btn btn--danger" onClick={stopTts} title="Stop the voice">■ Stop voice</button>}
+                    </div>
+                  </>
+                )}
+                {askErr && <p className="replay__askerr">{askErr}</p>}
+              </div>
+            )}
             {shareLink && (
               <div className="replay__sharebar">
                 <span className="caption">link copied — anyone signed in can watch</span>
