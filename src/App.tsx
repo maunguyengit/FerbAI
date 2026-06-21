@@ -16,7 +16,7 @@ import { catalogForPrompt } from './lib/viz/registry'
 import { useRecorder } from './lib/recording/useRecorder'
 import { DEMO_RECORDING } from './lib/recording/demoRecording'
 import { deleteRemote, fetchAudioUrl, getById, listMine, parseShareLink, saveRecording, setShared, shareLinkFor } from './lib/recording/store'
-import type { Recording } from './lib/recording/types'
+import type { GraphEqSnap, Recording, Scene } from './lib/recording/types'
 import { getSelection, setSelection as persistSelection } from './lib/storage'
 import type { AIAction, AIGraphEquation, ChatContext, GraphHandle, Tool, View, VizHandle, VizSpec, WhiteboardHandle } from './lib/types'
 import './App.css'
@@ -45,16 +45,36 @@ export default function App() {
   // cloud (DB) recordings for the signed-in user + any shared ones opened by link
   const [cloud, setCloud] = useState<Recording[]>([])
   const [opened, setOpened] = useState<Recording[]>([])
+  const [selectId, setSelectId] = useState<string | null>(null) // recording to auto-select in Replay
+
+  // live content of each window, kept in refs so the recorder can snapshot the
+  // whole scene (board + graph + learn) at any moment.
+  const viewRef = useRef<View>('board')
+  const graphEqsRef = useRef<GraphEqSnap[]>([])
+  const vizSpecRef = useRef<VizSpec | null>(null)
+  viewRef.current = view
+
+  const getScene = (): Scene => ({
+    view: viewRef.current,
+    elements: wbRef.current?.getElements() ?? [],
+    equations: graphEqsRef.current,
+    viz: vizSpecRef.current,
+  })
+
+  // record window switches + each window's content changes (while recording)
+  const recordEvent = recorder.recordEvent // stable (useCallback)
+  useEffect(() => { recordEvent({ type: 'view', view }) }, [view, recordEvent])
+  const onGraphEquations = (eqs: GraphEqSnap[]) => { graphEqsRef.current = eqs; recordEvent({ type: 'graph', equations: eqs }) }
+  const onVizSpec = (spec: VizSpec | null) => { vizSpecRef.current = spec; recordEvent({ type: 'viz', spec }) }
 
   // load the user's saved recordings on sign-in
   useEffect(() => {
-    if (auth.user) listMine(auth.user.id).then(setCloud)
+    if (auth.user) listMine(auth.user.id).then((recs) => { setCloud(recs); if (recs.length) setSelectId(recs[0].id) })
     else { setCloud([]); setOpened([]) }
   }, [auth.user?.id, auth.user])
 
   const startRecording = () => {
-    setView('board')
-    recorder.start({ title: `Lesson ${(auth.user ? cloud.length : recorder.recordings.length) + 1}`, getElements: () => wbRef.current?.getElements() ?? [] })
+    recorder.start({ title: `Lesson ${(auth.user ? cloud.length : recorder.recordings.length) + 1}`, getScene })
   }
 
   const [saveNotice, setSaveNotice] = useState<string | null>(null)
@@ -68,17 +88,22 @@ export default function App() {
       if (saved) {
         setCloud((c) => [saved, ...c])
         recorder.remove(rec.id) // drop the local copy now that the saved one is shown
+        setSelectId(saved.id)
       } else {
         setSaveNotice("Couldn't save to your account — it's kept locally for now. Did you run the SQL migration in Supabase?")
+        setSelectId(rec.id)
       }
+    } else if (rec) {
+      setSelectId(rec.id)
     }
   }
 
-  // the list shown in Replay: demo + opened-shared + cloud (saved) + any unsaved local
+  // the list shown in Replay: newest user recordings first (so a just-recorded
+  // lesson is auto-selected), then the bundled demo last.
   const replayRecordings: Recording[] = (() => {
     const seen = new Set<string>()
     const out: Recording[] = []
-    for (const r of [DEMO_RECORDING, ...opened, ...cloud, ...recorder.recordings.filter((r) => !r.demo)]) {
+    for (const r of [...opened, ...cloud, ...recorder.recordings.filter((r) => !r.demo), DEMO_RECORDING]) {
       if (seen.has(r.id)) continue
       seen.add(r.id); out.push(r)
     }
@@ -239,11 +264,11 @@ export default function App() {
           </div>
 
           <div className={`app__graph ${view === 'graph' ? '' : 'is-hidden'}`}>
-            <GraphView ref={graphRef} />
+            <GraphView ref={graphRef} onEquationsChange={onGraphEquations} />
           </div>
 
           <div className={`app__viz ${view === 'viz' ? '' : 'is-hidden'}`}>
-            <VisualizationView ref={vizRef} />
+            <VisualizationView ref={vizRef} onSpecChange={onVizSpec} />
           </div>
 
           <div className={`app__replay ${view === 'replay' ? '' : 'is-hidden'}`}>
@@ -252,6 +277,7 @@ export default function App() {
               canShare={!!auth.user}
               loggedIn={!!auth.user}
               notice={saveNotice}
+              selectId={selectId}
               onDelete={onDeleteRecording}
               onShare={onShareRecording}
               onOpenLink={onOpenLink}

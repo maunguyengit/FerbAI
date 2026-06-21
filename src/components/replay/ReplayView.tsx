@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import PlaybackCanvas from './PlaybackCanvas'
-import { stateAt, type Recording } from '../../lib/recording/types'
+import PlaybackStage from './PlaybackStage'
+import { sceneAt, EMPTY_SCENE, type Recording, type Scene } from '../../lib/recording/types'
 import { contentBoundsOf } from '../../lib/render'
 import type { Element } from '../../lib/types'
 import './ReplayView.css'
@@ -10,6 +10,7 @@ interface Props {
   canShare: boolean
   loggedIn: boolean
   notice: string | null
+  selectId: string | null
   onDelete: (id: string) => void | Promise<void>
   onShare: (id: string) => Promise<string | null>
   onOpenLink: (text: string) => Promise<{ ok: boolean; id?: string; error?: string }>
@@ -37,13 +38,13 @@ function countEventsLE(rec: Recording, t: number) {
   return lo
 }
 
-export default function ReplayView({ recordings, canShare, loggedIn, notice, onDelete, onShare, onOpenLink, resolveAudio }: Props) {
+export default function ReplayView({ recordings, canShare, loggedIn, notice, selectId, onDelete, onShare, onOpenLink, resolveAudio }: Props) {
   const [selId, setSelId] = useState<string | null>(null)
   const rec = useMemo(() => recordings.find((r) => r.id === selId) ?? null, [recordings, selId])
 
   const [playing, setPlaying] = useState(false)
   const [curMs, setCurMs] = useState(0)
-  const [elements, setElements] = useState<Element[]>([])
+  const [scene, setScene] = useState<Scene>(EMPTY_SCENE)
   const [audioSrc, setAudioSrc] = useState<string | null>(null)
   const [linkInput, setLinkInput] = useState('')
   const [linkMsg, setLinkMsg] = useState<string | null>(null)
@@ -64,14 +65,14 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, onD
     const v = virt.current
     return v.playing ? v.base + (performance.now() - v.wall) : v.base
   }
-  const applyAt = (ms: number) => { if (rec) { setElements(stateAt(rec, ms)); lastCountRef.current = countEventsLE(rec, ms) } }
+  const applyAt = (ms: number) => { if (rec) { setScene(sceneAt(rec, ms)); lastCountRef.current = countEventsLE(rec, ms) } }
   const stopLoop = () => { if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null } }
 
   const loop = () => {
     if (!rec) return
     const nowMs = getNow()
     const count = countEventsLE(rec, nowMs)
-    if (count !== lastCountRef.current) { lastCountRef.current = count; setElements(stateAt(rec, nowMs)) }
+    if (count !== lastCountRef.current) { lastCountRef.current = count; setScene(sceneAt(rec, nowMs)) }
     setCurMs(Math.min(nowMs, duration))
     if (nowMs >= duration) { doPause(true); return }
     if (playingRef.current) rafRef.current = requestAnimationFrame(loop)
@@ -105,14 +106,19 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, onD
     virt.current = { playing: false, base: 0, wall: 0 }
     lastCountRef.current = -1; setCurMs(0); setShareLink(null); setAudioSrc(null)
     if (rec) {
-      setElements(stateAt(rec, 0))
+      setScene(sceneAt(rec, 0))
       resolveAudio(rec).then((src) => setAudioSrc(src))
-    } else setElements([])
+    } else setScene(EMPTY_SCENE)
     return stopLoop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rec?.id])
 
-  // auto-select newest; keep selection valid
+  // explicit select request from the app (just-recorded, or newest on login)
+  useEffect(() => {
+    if (selectId && recordings.some((r) => r.id === selectId)) setSelId(selectId)
+  }, [selectId, recordings])
+
+  // keep selection valid; default to the first recording if none chosen
   useEffect(() => {
     if (recordings.length && (!selId || !recordings.some((r) => r.id === selId))) setSelId(recordings[0].id)
     if (!recordings.length) setSelId(null)
@@ -184,7 +190,7 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, onD
         {rec ? (
           <>
             <div className="replay__stage">
-              <PlaybackCanvas elements={elements} bounds={bounds} />
+              <PlaybackStage scene={scene} boardBounds={bounds} />
               {audioSrc && <audio ref={audioRef} src={audioSrc} preload="auto" onEnded={() => doPause(true)} />}
             </div>
             <div className="replay__transport">

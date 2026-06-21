@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Element } from '../types'
-import type { BoardEvent, RawBoardEvent, Recording, RecorderStatus, Snapshot } from './types'
+import type { RawSceneEvent, Recording, RecorderStatus, Scene, SceneEvent, Snapshot } from './types'
+import { EMPTY_SCENE } from './types'
 import { DEMO_RECORDING } from './demoRecording'
 
 const SNAPSHOT_EVERY_MS = 30_000
@@ -9,7 +9,7 @@ const rid = () => `rec_${Date.now().toString(36)}_${recSeq++}`
 
 interface StartOpts {
   title: string
-  getElements: () => Element[]
+  getScene: () => Scene
 }
 
 export interface RecorderApi {
@@ -20,8 +20,8 @@ export interface RecorderApi {
   error: string | null
   start: (opts: StartOpts) => Promise<void>
   stop: () => Promise<Recording | null>
-  /** called for every committed board mutation — recorded only while active */
-  recordEvent: (ev: RawBoardEvent) => void
+  /** called for every content change (board/graph/viz/view) — recorded only while active */
+  recordEvent: (ev: RawSceneEvent) => void
   remove: (id: string) => void
 }
 
@@ -34,9 +34,9 @@ export function useRecorder(): RecorderApi {
   const [error, setError] = useState<string | null>(null)
 
   const startTimeRef = useRef(0)
-  const eventsRef = useRef<BoardEvent[]>([])
+  const eventsRef = useRef<SceneEvent[]>([])
   const snapsRef = useRef<Snapshot[]>([])
-  const getElementsRef = useRef<() => Element[]>(() => [])
+  const getSceneRef = useRef<() => Scene>(() => EMPTY_SCENE)
   const titleRef = useRef('Recording')
 
   const mediaRef = useRef<MediaRecorder | null>(null)
@@ -47,14 +47,19 @@ export function useRecorder(): RecorderApi {
 
   const now = () => Date.now() - startTimeRef.current
 
-  const recordEvent = useCallback((ev: RawBoardEvent) => {
+  const recordEvent = useCallback((ev: RawSceneEvent) => {
     if (startTimeRef.current === 0) return // not recording
-    eventsRef.current.push({ ...ev, t: now() })
+    eventsRef.current.push({ ...ev, t: now() } as SceneEvent)
   }, [])
 
-  const start = useCallback(async ({ title, getElements }: StartOpts) => {
+  const snapScene = (t: number): Snapshot => {
+    const s = getSceneRef.current()
+    return { t, elements: s.elements, view: s.view, equations: s.equations, viz: s.viz }
+  }
+
+  const start = useCallback(async ({ title, getScene }: StartOpts) => {
     setError(null)
-    getElementsRef.current = getElements
+    getSceneRef.current = getScene
     titleRef.current = title
     eventsRef.current = []
     snapsRef.current = []
@@ -77,12 +82,12 @@ export function useRecorder(): RecorderApi {
     setHasAudio(audioOk)
 
     startTimeRef.current = Date.now()
-    snapsRef.current.push({ t: 0, elements: getElements() }) // initial state
+    snapsRef.current.push(snapScene(0)) // initial scene
     setStatus('recording')
     setElapsedMs(0)
 
     snapTimerRef.current = window.setInterval(() => {
-      snapsRef.current.push({ t: now(), elements: getElementsRef.current() })
+      snapsRef.current.push(snapScene(now()))
     }, SNAPSHOT_EVERY_MS)
     elapsedTimerRef.current = window.setInterval(() => setElapsedMs(now()), 250)
   }, [])
@@ -93,7 +98,7 @@ export function useRecorder(): RecorderApi {
     if (snapTimerRef.current) { clearInterval(snapTimerRef.current); snapTimerRef.current = null }
     if (elapsedTimerRef.current) { clearInterval(elapsedTimerRef.current); elapsedTimerRef.current = null }
     // final snapshot
-    snapsRef.current.push({ t: durationMs, elements: getElementsRef.current() })
+    snapsRef.current.push(snapScene(durationMs))
 
     // finalize audio
     let audioUrl: string | undefined

@@ -80,8 +80,20 @@
   overflow: hidden;
   background: var(--color-paper-2);
 }
+.replay__stage { display: flex; }
+.replay__stage > .pbcanvas,
+.replay__stage > .pbgraph,
+.replay__stage > .pbviz { flex: 1; min-width: 0; min-height: 0; }
+.replay__stage audio { display: none; }
 .pbcanvas { width: 100%; height: 100%; }
 .pbcanvas canvas { display: block; width: 100%; height: 100%; }
+.pbgraph { width: 100%; height: 100%; }
+
+.pbviz { display: flex; flex-direction: column; min-height: 0; padding: var(--space-md); overflow: auto; gap: var(--space-sm); background: var(--color-paper-2); }
+.pbviz__title { font-family: var(--font-display); font-weight: 800; font-size: var(--text-lg); }
+.pbviz__body { flex: 1; min-height: 0; display: flex; }
+.pbviz__body > * { flex: 1; min-width: 0; }
+.pbviz-empty { display: grid; place-items: center; height: 100%; color: var(--color-ink-soft); padding: var(--space-xl); }
 
 .replay__transport {
   display: flex; align-items: center; gap: var(--space-sm);

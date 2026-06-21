@@ -4,7 +4,7 @@
 // recordings can be heard by other signed-in users.
 
 import { supabase } from '../supabase/client'
-import type { BoardEvent, Recording, Snapshot } from './types'
+import type { Recording, SceneEvent, Snapshot } from './types'
 
 const BUCKET = 'recordings'
 
@@ -13,7 +13,7 @@ interface Row {
   owner: string
   title: string
   duration_ms: number
-  events: BoardEvent[]
+  events: SceneEvent[]
   snapshots: Snapshot[]
   audio_path: string | null
   audio_mime: string | null
