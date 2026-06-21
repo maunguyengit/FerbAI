@@ -39,6 +39,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [keysVersion, setKeysVersion] = useState(0)
   const [ready, setReady] = useState(false)
+  const [chatOpen, setChatOpen] = useState(true)
 
   const auth = useAuth()
   const recorder = useRecorder()
@@ -237,6 +238,12 @@ export default function App() {
           <span className={`ready ${ready ? 'ready--on' : 'ready--off'}`}>
             <span className="ready__dot" /> {ready ? 'ready' : 'offline'}
           </span>
+          <button
+            className={`btn topbar__chat ${chatOpen ? 'is-on' : ''}`}
+            onClick={() => setChatOpen((o) => !o)}
+            title={chatOpen ? 'Hide the Tutor panel' : 'Show the Tutor panel'}
+            aria-pressed={chatOpen}
+          >✦ Tutor</button>
           <button className="btn topbar__settings" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="API settings">⚙</button>
           {!auth.localMode && auth.user && (
             <button className="btn topbar__signout" onClick={() => auth.signOut()} title={`Sign out ${auth.user.email ?? ''}`}>⏻</button>
@@ -291,6 +298,7 @@ export default function App() {
         </section>
 
         <ChatPanel
+          open={chatOpen}
           selection={selection}
           view={view}
           getActiveImage={getActiveImage}

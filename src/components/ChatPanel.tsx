@@ -9,6 +9,7 @@ import type { AIAction, AIGraphEquation, ChatContext, ChatMessage, View, VizSpec
 import './ChatPanel.css'
 
 interface Props {
+  open: boolean
   selection: string
   view: View
   getActiveImage: () => Promise<string | null>
@@ -24,7 +25,7 @@ let msgSeq = 0
 const mid = () => `m_${Date.now().toString(36)}_${msgSeq++}`
 
 export default function ChatPanel({
-  selection, view, getActiveImage, activeEmpty, getContext, applyDraw, applyGraph, applyViz, keysVersion,
+  open, selection, view, getActiveImage, activeEmpty, getContext, applyDraw, applyGraph, applyViz, keysVersion,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
@@ -163,7 +164,7 @@ export default function ChatPanel({
   }
 
   return (
-    <aside className="chat">
+    <aside className={`chat ${open ? '' : 'is-hidden'}`}>
       <header className="chat__head">
         <div className="chat__head-title">
           <span className="chat__spark" aria-hidden>✦</span>
