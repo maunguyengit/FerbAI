@@ -2,8 +2,10 @@ import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import { PROVIDERS, SYSTEM_PROMPT, envKeyFor } from './providers.js'
+import { WebSocketServer } from 'ws'
+import { LiveTranscriptionEvents } from '@deepgram/sdk'
 import { supabaseAdmin, supabaseEnabled, AUDIO_BUCKET } from './supabase.js'
-import { deepgramEnabled, mintTempKey } from './deepgram.js'
+import { deepgramEnabled, dgClient, LIVE_OPTIONS } from './deepgram.js'
 
 const app = express()
 const PORT = process.env.PORT || 8787
@@ -11,18 +13,8 @@ const PORT = process.env.PORT || 8787
 app.use(cors())
 app.use(express.json({ limit: '12mb' })) // board PNGs can be large
 
-// ---- Deepgram: is it configured + a short-lived browser token ----
+// ---- Deepgram: configured check (the audio relay is a WebSocket, see below) ----
 app.get('/api/deepgram/status', (_req, res) => res.json({ configured: deepgramEnabled }))
-
-app.get('/api/deepgram/token', async (_req, res) => {
-  if (!deepgramEnabled) return res.status(503).json({ error: 'Deepgram not configured.' })
-  try {
-    const { key, expiresIn } = await mintTempKey()
-    res.json({ key, expiresIn })
-  } catch (e) {
-    res.status(500).json({ error: e?.message || 'token error' })
-  }
-})
 
 // ---- auto-chapters: Claude segments a finished transcript into chapters ----
 app.post('/api/chapters', async (req, res) => {
@@ -370,6 +362,31 @@ const httpServer = app.listen(PORT, () => {
   console.log(`\n  FerbAI proxy → http://localhost:${PORT}`)
   console.log(`  keys from .env: ${configured.length ? configured.join(', ') : '(none — paste in Settings)'}\n`)
 })
+
+// ---- Deepgram audio relay ----
+// The browser streams mic audio here; we forward it to Deepgram with the
+// server-held key and relay transcripts back. Avoids needing browser tokens.
+const dgWss = new WebSocketServer({ server: httpServer, path: '/api/deepgram/stream' })
+dgWss.on('connection', (client) => {
+  if (!deepgramEnabled || !dgClient) { client.close(); return }
+  const dg = dgClient.listen.live(LIVE_OPTIONS)
+  let dgOpen = false
+  const queue = []
+  const flush = () => { while (queue.length) dg.send(queue.shift()) }
+
+  dg.on(LiveTranscriptionEvents.Open, () => { dgOpen = true; flush(); safeSend(client, { type: 'open' }) })
+  dg.on(LiveTranscriptionEvents.Transcript, (data) => safeSend(client, { type: 'transcript', data }))
+  dg.on(LiveTranscriptionEvents.Error, (e) => safeSend(client, { type: 'error', error: String(e?.message || e) }))
+  dg.on(LiveTranscriptionEvents.Close, () => { try { client.close() } catch { /* */ } })
+
+  client.on('message', (chunk) => {
+    if (dgOpen) dg.send(chunk)
+    else queue.push(chunk)
+  })
+  client.on('close', () => { try { dg.requestClose() } catch { /* */ } })
+  client.on('error', () => { try { dg.requestClose() } catch { /* */ } })
+})
+function safeSend(ws, obj) { try { if (ws.readyState === 1) ws.send(JSON.stringify(obj)) } catch { /* */ } }
 
 httpServer.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {

@@ -8,8 +8,8 @@ export default defineConfig({
     port: 5173,
     open: true,
     proxy: {
-      // forward API calls to the thin backend proxy (server/index.js)
-      '/api': 'http://localhost:8787',
+      // forward API calls (HTTP + the Deepgram audio WebSocket) to the backend
+      '/api': { target: 'http://localhost:8787', ws: true },
     },
   },
 })
