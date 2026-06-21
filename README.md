@@ -154,8 +154,9 @@ instead of straight from the browser. That buys you three things:
 - **One normalized stream.** Anthropic and OpenAI shapes are unified into a single
   SSE format (`data: {"t": "…"}`), so the frontend has one tiny parser.
 
-The proxy never persists anything — `.env` keys are read at start, UI-pasted keys
-are used for that one request and discarded.
+The proxy does not persist API keys — `.env` keys are read at start, UI-pasted
+keys are used for that one request and discarded. Tutoring memory is persisted
+separately when Redis is configured, as described below.
 
 ## Two-agent memory and review loop
 
@@ -180,6 +181,61 @@ session ([`getAgentMemoryPacket`](server/memory.js)): recent events, the current
 session summary, Agent 2 guidance, and semantically similar prior sessions for
 that same user. Agent 2 notes are injected as advisory coaching context so the
 tutor can adapt without exposing the memory block to the student.
+
+### Agent 2 MCP
+
+Agent 2 is also available as a local stdio MCP server:
+
+```bash
+npm run mcp:agent2
+```
+
+It exposes three tools:
+
+- `agent2.review_transcript` — score an explicit transcript and optionally write
+  the review into FerbAI memory.
+- `agent2.review_agent1_session` — load Agent 1 events for a FerbAI `sessionId`,
+  run the Agent 2 review, and persist the guidance.
+- `arize_evaluator.agent1_session` — prepare or trigger an Arize evaluator task
+  for Agent 1 session traces. This pairs with FerbAI's backend OpenTelemetry /
+  OpenInference tracing so Agent 1 session spans can be evaluated in Arize.
+
+## Arize AX tracing
+
+The backend initializes tracing from [`server/instrumentation.mjs`](server/instrumentation.mjs),
+which is imported first by [`server/index.js`](server/index.js). It uses
+OpenTelemetry with a BatchSpanProcessor and exports OTLP traces to Arize AX when
+credentials are present.
+
+Set these in `.env` to export traces:
+
+```bash
+ARIZE_SPACE_ID=...
+ARIZE_API_KEY=...
+ARIZE_PROJECT_NAME=ferbai-tutor
+# optional override; defaults to Arize's OTLP traces endpoint
+ARIZE_COLLECTOR_ENDPOINT=https://otlp.arize.com/v1/traces
+```
+
+If `ARIZE_SPACE_ID` or `ARIZE_API_KEY` is missing, the backend logs that the
+exporter is disabled and keeps running normally.
+
+Current span model:
+
+- `agent1.ask_recording` — LLM span around the Anthropic paused-recording Q&A
+  call in `/api/ask`, with capped `input.value`, `output.value`, model name,
+  session/recording IDs, and board metadata.
+- `agent1.generate_chapters` — LLM span around `/api/chapters`, with capped
+  transcript prompt and parsed chapter output.
+- `agent2.tutor_review` — CHAIN span around `scoreTutorTranscript`, with verdict,
+  average score, per-dimension rubric scores/labels, evidence counts, and board
+  grounding metadata.
+- `tutoring_session` — CHAIN span when a session is ended through
+  `/api/memory/session/:sessionId/end`, with session ID, recording ID, lesson
+  goal, and memory summary output.
+
+Look for traces under the `ARIZE_PROJECT_NAME` project, defaulting to
+`ferbai-tutor`.
 
 ## Redis memory, vector search, and embedding cache
 
@@ -229,6 +285,34 @@ If local embeddings fail, FerbAI still saves normal session events and summaries
 You can optionally configure `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY`, and
 `EMBEDDINGS_MODEL` as an OpenAI-compatible fallback.
 
+## Verification
+
+Useful local checks:
+
+```bash
+npm run embeddings:health   # verifies the local HF embedding worker/model
+npm run test:memory         # exercises session memory and Agent 2 guidance
+npm run build               # TypeScript + production Vite build
+```
+
+The current live E2E path has been verified with Redis Stack and the warm local
+HF worker enabled:
+
+- `MEMORY_EMBEDDINGS_BACKEND=redisvl-hf`
+- `MEMORY_VECTOR_BACKEND=redis-stack`
+- Redis responded with `PONG`.
+- Redis Search had `ferbai_summary_vector_idx_384`.
+- The HF worker loaded `sentence-transformers/all-MiniLM-L6-v2` and returned
+  384-dimensional embeddings.
+- Session finalization wrote Redis Stack vector docs.
+- A later session packet retrieved a prior semantically similar session through
+  user-filtered vector search.
+- A multi-user sequence `user1 -> user2 -> user1 -> user3 -> user2` retrieved
+  only each user's own prior session:
+  - user1's second query matched user1's first session.
+  - user2's second query matched user2's first session.
+  - user1 did not retrieve user2 memory, and user2 did not retrieve user1 memory.
+
 ## CORS / providers
 
 The OpenAI-compatible groups (DeepSeek, OpenCode Go) have **editable Base URLs**
@@ -241,7 +325,13 @@ proxy, the real OpenCode Go endpoint). Adjust the model IDs in
 
 ```
 server/
-  index.js                 thin streaming proxy: /api/chat, /api/providers, /api/health
+  index.js                 Express API: chat, recording Q&A, chapters, memory, review, health
+  instrumentation.mjs      OpenTelemetry / Arize AX tracing setup
+  memory.js                session memory, Agent 2 guidance, Redis vector retrieval, embedding cache
+  tutorReview.js           local Agent 2 tutor rubric scorer
+  agent2_mcp.js            stdio MCP server for Agent 2 review/evaluator tools
+  embedding_worker.py      warm local HF embedding worker
+  redisvl_embed.py         RedisVL/HF embedding health helper
   providers.js             server-side model catalog + system prompt + env-key mapping
 src/
   App.tsx                  layout: board (left) + chat (right)

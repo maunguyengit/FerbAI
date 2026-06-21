@@ -9,12 +9,17 @@
     "dev:api": "node server/index.js",
     "build": "tsc -b && vite build",
     "embeddings:health": "python server/redisvl_embed.py --health",
+    "mcp:agent2": "node server/agent2_mcp.js",
     "test:memory": "node server/memory.test.js",
     "preview": "vite preview",
     "start": "node server/index.js"
   },
   "dependencies": {
     "@deepgram/sdk": "^3.13.0",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
+    "@opentelemetry/resources": "^2.8.0",
+    "@opentelemetry/sdk-trace-node": "^2.8.0",
     "@supabase/supabase-js": "^2.108.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

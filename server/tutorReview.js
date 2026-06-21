@@ -1,3 +1,5 @@
+import { setSpanAttributes, truncate, withSpanSync } from './instrumentation.mjs'
+
 const QUESTION_RE = /\?/g
 const TURN_RE = /^\s*(student|client|learner|user|tutor|agent|assistant|teacher)\s*:/i
 const POSITIVE_RE = /\b(good|great|nice|correct|exactly|well done|you got|that's right)\b/gi
@@ -62,10 +64,24 @@ export function messagesToTranscript(messages = []) {
     .join('\n\n')
 }
 
-export function scoreTutorTranscript({ transcript, boardState = '', lessonGoal = '' }) {
+export function scoreTutorTranscript({ transcript, boardState = '', lessonGoal = '', sessionId, userId, recordingId }) {
   const normalized = String(transcript || '').trim()
   if (!normalized) throw new Error('Transcript is empty.')
 
+  return withSpanSync('agent2.tutor_review', {
+    'openinference.span.kind': 'CHAIN',
+    'attributes.openinference.span.kind': 'CHAIN',
+    'input.value': truncate(normalized),
+    'attributes.input.value': truncate(normalized),
+    'session.id': sessionId,
+    'user.id': userId,
+    'recording.id': recordingId,
+    'board.has_state': !!String(boardState || '').trim(),
+    'lesson_goal.present': !!String(lessonGoal || '').trim(),
+  }, (span) => scoreTutorTranscriptInner({ normalized, boardState, lessonGoal, span }))
+}
+
+function scoreTutorTranscriptInner({ normalized, boardState = '', lessonGoal = '', span }) {
   const turns = countTurns(normalized)
   const wordCount = normalized.split(/\s+/).filter(Boolean).length
   const questionCount = countMatches(normalized, QUESTION_RE)
@@ -124,7 +140,7 @@ export function scoreTutorTranscript({ transcript, boardState = '', lessonGoal =
     recommendations.push("Add specific encouragement tied to the student's reasoning, not generic praise.")
   }
 
-  return {
+  const review = {
     verdict,
     averageScore,
     dimensions,
@@ -145,6 +161,49 @@ export function scoreTutorTranscript({ transcript, boardState = '', lessonGoal =
     },
     note: 'Local heuristic analysis, not an Arize task result.',
   }
+  setSpanAttributes(span, {
+    'output.value': truncate({
+      verdict: review.verdict,
+      averageScore: review.averageScore,
+      recommendations: review.recommendations,
+      risks: review.risks,
+    }),
+    'attributes.output.value': truncate({
+      verdict: review.verdict,
+      averageScore: review.averageScore,
+      recommendations: review.recommendations,
+      risks: review.risks,
+    }),
+    'tutor_review.verdict': review.verdict,
+    'tutor_review.average_score': review.averageScore,
+    'tutor_review.has_board_state': hasBoardState,
+    'tutor_review.has_lesson_goal': hasGoal,
+    'tutor_review.word_count': wordCount,
+    'tutor_review.question_count': questionCount,
+    'tutor_review.scaffolding_hits': scaffoldHits,
+    'tutor_review.understanding_check_hits': understandingHits,
+    'tutor_review.encouragement_hits': encouragementHits,
+    'tutor_review.assessment_hits': assessmentHits,
+    'tutor_review.board_mentions': boardMentions,
+    'tutor_review.evidence.word_count': wordCount,
+    'tutor_review.evidence.question_count': questionCount,
+    'tutor_review.evidence.board_mentions': boardMentions,
+    'tutor_review.dimensions.student_engagement.score': interactionScore,
+    'tutor_review.dimensions.student_engagement.label': labelFor(interactionScore),
+    'tutor_review.dimensions.diagnosis.score': diagnosisScore,
+    'tutor_review.dimensions.diagnosis.label': labelFor(diagnosisScore),
+    'tutor_review.dimensions.scaffolding.score': scaffoldingScore,
+    'tutor_review.dimensions.scaffolding.label': labelFor(scaffoldingScore),
+    'tutor_review.dimensions.board_grounding.score': boardScore,
+    'tutor_review.dimensions.board_grounding.label': labelFor(boardScore),
+    'tutor_review.dimensions.supportive_tone.score': affectScore,
+    'tutor_review.dimensions.supportive_tone.label': labelFor(affectScore),
+    'tutor_review.dimensions.lesson_goal_alignment.score': goalScore,
+    'tutor_review.dimensions.lesson_goal_alignment.label': labelFor(goalScore),
+    'board.mentions_count': boardMentions,
+    'board.grounded': hasBoardState && boardMentions > 0,
+  })
+  return review
 }
 
 export function formatTutorReview(review) {

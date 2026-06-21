@@ -1,4 +1,4 @@
-import 'dotenv/config'
+import './instrumentation.mjs'
 import express from 'express'
 import cors from 'cors'
 import { PROVIDERS, SYSTEM_PROMPT, ASK_SYSTEM_PROMPT, envKeyFor } from './providers.js'
@@ -13,6 +13,7 @@ import {
   getAgentMemoryPacket,
   writeAgent2ReviewMemory,
 } from './memory.js'
+import { setSpanAttributes, truncate, withSpan } from './instrumentation.mjs'
 
 const app = express()
 const PORT = process.env.PORT || 8787
@@ -25,7 +26,7 @@ app.get('/api/deepgram/status', (_req, res) => res.json({ configured: deepgramEn
 
 // ---- Ask the recording: student paused a lesson + asked a question ----
 app.post('/api/ask', async (req, res) => {
-  const { image, transcriptWindow, question } = req.body || {}
+  const { image, transcriptWindow, question, sessionId, recordingId, activeView } = req.body || {}
   const apiKey = envKeyFor('claude-code')
   if (!apiKey) return res.status(503).json({ error: 'No Claude key configured.' })
 
@@ -35,7 +36,7 @@ app.post('/api/ask', async (req, res) => {
   }
   content.push({
     type: 'text',
-    text: `Teacher's explanation around this moment:\n"""\n${(transcriptWindow || '(no transcript available for this moment)').slice(0, 4000)}\n"""\n\nStudent's question: "${(question || '').slice(0, 600)}"`,
+    text: askInputText(transcriptWindow, question),
   })
 
   res.set({ 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
@@ -44,24 +45,57 @@ app.post('/api/ask', async (req, res) => {
   res.on('close', () => { if (!res.writableEnded) abort.abort() })
 
   try {
-    const upstream = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', signal: abort.signal,
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: ASK_SYSTEM_PROMPT, stream: true, messages: [{ role: 'user', content }] }),
+    const streamed = await withSpan('agent1.ask_recording', {
+      'openinference.span.kind': 'LLM',
+      'attributes.openinference.span.kind': 'LLM',
+      'llm.model_name': 'claude-sonnet-4-6',
+      'attributes.llm.model_name': 'claude-sonnet-4-6',
+      'input.value': truncate(content.find((item) => item.type === 'text')?.text),
+      'attributes.input.value': truncate(content.find((item) => item.type === 'text')?.text),
+      'session.id': sessionId,
+      'recording.id': recordingId,
+      'board.active_view': activeView,
+      'board.used': !!image,
+      'board.image_attached': !!image,
+    }, async (span) => {
+      const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST', signal: abort.signal,
+        headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: ASK_SYSTEM_PROMPT, stream: true, messages: [{ role: 'user', content }] }),
+      })
+      setSpanAttributes(span, { 'http.response.status_code': upstream.status })
+      if (!upstream.ok || !upstream.body) {
+        const detail = await readError(upstream)
+        setSpanAttributes(span, {
+          'output.value': `Claude ${upstream.status}: ${detail}`,
+          'attributes.output.value': `Claude ${upstream.status}: ${detail}`,
+        })
+        res.write(`data: ${JSON.stringify({ error: `Claude ${upstream.status}: ${detail}` })}\n\n`)
+        res.end()
+        return false
+      }
+      let answerText = ''
+      await pumpSSE(upstream.body, (data) => {
+        if (data === '[DONE]') return
+        try {
+          const evt = JSON.parse(data)
+          if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
+            answerText += evt.delta.text
+            res.write(`data: ${JSON.stringify({ t: evt.delta.text })}\n\n`)
+          } else if (evt.type === 'error') {
+            const message = evt.error?.message || 'stream error'
+            setSpanAttributes(span, { 'llm.stream.error': message })
+            res.write(`data: ${JSON.stringify({ error: message })}\n\n`)
+          }
+        } catch { /* */ }
+      })
+      setSpanAttributes(span, {
+        'output.value': truncate(answerText),
+        'attributes.output.value': truncate(answerText),
+      })
+      return true
     })
-    if (!upstream.ok || !upstream.body) {
-      const detail = await readError(upstream)
-      res.write(`data: ${JSON.stringify({ error: `Claude ${upstream.status}: ${detail}` })}\n\n`)
-      return res.end()
-    }
-    await pumpSSE(upstream.body, (data) => {
-      if (data === '[DONE]') return
-      try {
-        const evt = JSON.parse(data)
-        if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') res.write(`data: ${JSON.stringify({ t: evt.delta.text })}\n\n`)
-        else if (evt.type === 'error') res.write(`data: ${JSON.stringify({ error: evt.error?.message || 'stream error' })}\n\n`)
-      } catch { /* */ }
-    })
+    if (!streamed) return
     res.write('data: [DONE]\n\n')
     res.end()
   } catch (e) {
@@ -117,20 +151,39 @@ Transcript:
 ${text}`
 
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
+    const chapters = await withSpan('agent1.generate_chapters', {
+      'openinference.span.kind': 'LLM',
+      'attributes.openinference.span.kind': 'LLM',
+      'llm.model_name': 'claude-haiku-4-5-20251001',
+      'attributes.llm.model_name': 'claude-haiku-4-5-20251001',
+      'input.value': truncate(prompt),
+      'attributes.input.value': truncate(prompt),
+      'transcript.word_count': words.length,
+      'session.id': req.body?.sessionId,
+      'recording.id': req.body?.recordingId,
+    }, async (span) => {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
+      })
+      setSpanAttributes(span, { 'http.response.status_code': r.status })
+      if (!r.ok) return []
+      const body = await r.json()
+      const raw = body?.content?.[0]?.text ?? ''
+      setSpanAttributes(span, { 'llm.raw_output': truncate(raw) })
+      const m = raw.match(/\{[\s\S]*\}/)
+      if (!m) return []
+      const parsed = JSON.parse(m[0])
+      const chapters = Array.isArray(parsed?.chapters)
+        ? parsed.chapters.filter((c) => typeof c?.t === 'number' && typeof c?.title === 'string').sort((a, b) => a.t - b.t)
+        : []
+      setSpanAttributes(span, {
+        'output.value': truncate({ chapters }),
+        'attributes.output.value': truncate({ chapters }),
+      })
+      return chapters
     })
-    if (!r.ok) return res.json({ chapters: [] })
-    const body = await r.json()
-    const raw = body?.content?.[0]?.text ?? ''
-    const m = raw.match(/\{[\s\S]*\}/)
-    if (!m) return res.json({ chapters: [] })
-    const parsed = JSON.parse(m[0])
-    const chapters = Array.isArray(parsed?.chapters)
-      ? parsed.chapters.filter((c) => typeof c?.t === 'number' && typeof c?.title === 'string').sort((a, b) => a.t - b.t)
-      : []
     res.json({ chapters })
   } catch (e) {
     res.json({ chapters: [], error: e?.message })
@@ -180,11 +233,14 @@ app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
 app.post('/api/tutor-review', (req, res) => {
   try {
-    const { messages = [], transcript, boardState = '', lessonGoal = '', sessionId } = req.body || {}
+    const { messages = [], transcript, boardState = '', lessonGoal = '', sessionId, userId, recordingId } = req.body || {}
     const review = scoreTutorTranscript({
       transcript: transcript || messagesToTranscript(messages),
       boardState,
       lessonGoal,
+      sessionId,
+      userId,
+      recordingId,
     })
     const summary = formatTutorReview(review)
     if (sessionId) {
@@ -202,7 +258,24 @@ app.post('/api/memory/session/:sessionId/end', async (req, res) => {
   try {
     const { sessionId } = req.params
     const { metadata = {}, userId = 'local-user' } = req.body || {}
-    const summary = await finalizeAgent1Session({ sessionId, userId, metadata })
+    const summary = await withSpan('tutoring_session', {
+      'openinference.span.kind': 'CHAIN',
+      'attributes.openinference.span.kind': 'CHAIN',
+      'session.id': sessionId,
+      'user.id': userId,
+      'recording.id': metadata?.recordingId,
+      'lesson.goal': metadata?.lessonGoal,
+      'input.value': truncate({ sessionId, metadata }),
+      'attributes.input.value': truncate({ sessionId, metadata }),
+    }, async (span) => {
+      const summary = await finalizeAgent1Session({ sessionId, userId, metadata })
+      setSpanAttributes(span, {
+        'output.value': truncate(summary),
+        'attributes.output.value': truncate(summary),
+        'memory.summary.created': !!summary,
+      })
+      return summary
+    })
     res.json({ summary })
   } catch (err) {
     res.status(400).json({ error: err?.message || 'Could not finalize session memory.' })
@@ -532,6 +605,10 @@ function callOpenAI({ base, apiKey, model, messages, image, sendImage, signal })
 }
 
 // ---------------------------------------------------------------- helpers
+function askInputText(transcriptWindow, question) {
+  return `Teacher's explanation around this moment:\n"""\n${(transcriptWindow || '(no transcript available for this moment)').slice(0, 4000)}\n"""\n\nStudent's question: "${(question || '').slice(0, 600)}"`
+}
+
 async function pumpSSE(body, onData) {
   const reader = body.getReader()
   const decoder = new TextDecoder()
