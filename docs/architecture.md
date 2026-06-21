@@ -1,4 +1,4 @@
-# ChalkAI Architecture
+# FerbAI Architecture
 
 ```mermaid
 flowchart LR
