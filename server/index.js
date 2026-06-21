@@ -2,12 +2,43 @@ import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import { PROVIDERS, SYSTEM_PROMPT, envKeyFor } from './providers.js'
+import { supabaseAdmin, supabaseEnabled, AUDIO_BUCKET } from './supabase.js'
 
 const app = express()
 const PORT = process.env.PORT || 8787
 
 app.use(cors())
 app.use(express.json({ limit: '12mb' })) // board PNGs can be large
+
+// ---- signed URL for a recording's audio (after verifying the listener) ----
+// The browser can read the recording row (RLS allows owner or shared), but the
+// audio bucket is private. This endpoint verifies the caller's Supabase token,
+// re-checks owner/shared with service_role, then issues a short-lived URL.
+app.post('/api/recordings/audio-url', async (req, res) => {
+  if (!supabaseEnabled || !supabaseAdmin) return res.status(503).json({ error: 'Storage not configured.' })
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+  const recordingId = req.body?.recordingId
+  if (!token) return res.status(401).json({ error: 'Not signed in.' })
+  if (!recordingId) return res.status(400).json({ error: 'Missing recordingId.' })
+  try {
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token)
+    if (userErr || !userData?.user) return res.status(401).json({ error: 'Invalid session.' })
+    const uid = userData.user.id
+
+    const { data: rec, error: recErr } = await supabaseAdmin
+      .from('recordings').select('owner, shared, audio_path').eq('id', recordingId).single()
+    if (recErr || !rec) return res.status(404).json({ error: 'Recording not found.' })
+    if (rec.owner !== uid && !rec.shared) return res.status(403).json({ error: 'Not allowed.' })
+    if (!rec.audio_path) return res.json({ url: null }) // silent recording
+
+    const { data: signed, error: signErr } = await supabaseAdmin
+      .storage.from(AUDIO_BUCKET).createSignedUrl(rec.audio_path, 3600)
+    if (signErr) return res.status(500).json({ error: signErr.message })
+    res.json({ url: signed.signedUrl })
+  } catch (e) {
+    res.status(500).json({ error: e?.message || 'audio url error' })
+  }
+})
 
 // ---- which providers have a key configured (env), for the UI status chips ----
 app.get('/api/providers', (_req, res) => {

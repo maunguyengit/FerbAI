@@ -2,7 +2,13 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import Plotly from 'plotly.js-dist-min'
 import { buildPlot, classify, PALETTE, PLOT_CONFIG, resolveColor } from '../lib/graph'
 import type { AIGraphEquation, GraphEquation, GraphHandle } from '../lib/types'
+import type { GraphEqSnap } from '../lib/recording/types'
 import './GraphView.css'
+
+interface GraphProps {
+  /** report equation changes so a recording can capture the graph window */
+  onEquationsChange?: (eqs: GraphEqSnap[]) => void
+}
 
 let gid = 0
 const uid = () => `g_${Date.now().toString(36)}_${gid++}`
@@ -14,13 +20,20 @@ const SAMPLES: { label: string; raw: string }[] = [
   { label: 'saddle (3D)', raw: 'z = x^2 - y^2' },
 ]
 
-const GraphView = forwardRef<GraphHandle, object>(function GraphView(_props, ref) {
+const GraphView = forwardRef<GraphHandle, GraphProps>(function GraphView({ onEquationsChange }, ref) {
   const plotRef = useRef<HTMLDivElement>(null)
   const [equations, setEquations] = useState<GraphEquation[]>([])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [draft, setDraft] = useState('')
   const equationsRef = useRef<GraphEquation[]>([])
   equationsRef.current = equations
+  const onEqChangeRef = useRef(onEquationsChange)
+  onEqChangeRef.current = onEquationsChange
+
+  // report the current equation set (raw + color) whenever it changes
+  useEffect(() => {
+    onEqChangeRef.current?.(equations.filter((e) => e.visible).map((e) => ({ raw: e.raw, color: e.color })))
+  }, [equations])
 
   // (re)render the plot whenever equations change
   useEffect(() => {
