@@ -15,6 +15,8 @@ interface Row {
   duration_ms: number
   events: SceneEvent[]
   snapshots: Snapshot[]
+  transcript: unknown
+  chapters: unknown
   audio_path: string | null
   audio_mime: string | null
   shared: boolean
@@ -29,6 +31,8 @@ function rowToRecording(row: Row, mine: boolean): Recording {
     durationMs: row.duration_ms,
     events: row.events ?? [],
     snapshots: row.snapshots ?? [],
+    transcript: (row.transcript as Recording['transcript']) ?? undefined,
+    chapters: (row.chapters as Recording['chapters']) ?? undefined,
     audioMime: row.audio_mime ?? undefined,
     audioPath: row.audio_path ?? undefined,
     shared: row.shared,
@@ -53,8 +57,9 @@ export async function saveRecording(rec: Recording, ownerId: string): Promise<Re
 
   const { data, error } = await supabase.from('recordings').insert({
     id, owner: ownerId, title: rec.title, duration_ms: rec.durationMs,
-    events: rec.events, snapshots: rec.snapshots, audio_path: audioPath,
-    audio_mime: rec.audioMime ?? null, shared: false,
+    events: rec.events, snapshots: rec.snapshots,
+    transcript: rec.transcript ?? null, chapters: rec.chapters ?? null,
+    audio_path: audioPath, audio_mime: rec.audioMime ?? null, shared: false,
   }).select('*').single()
 
   if (error || !data) { console.error('saveRecording failed', error); return null }

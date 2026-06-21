@@ -16,6 +16,7 @@ import { catalogForPrompt } from './lib/viz/registry'
 import { useRecorder } from './lib/recording/useRecorder'
 import { DEMO_RECORDING } from './lib/recording/demoRecording'
 import { deleteRemote, fetchAudioUrl, getById, listMine, parseShareLink, saveRecording, setShared, shareLinkFor } from './lib/recording/store'
+import { generateChapters } from './lib/recording/chapters'
 import type { GraphEqSnap, Recording, Scene } from './lib/recording/types'
 import { getSelection, setSelection as persistSelection } from './lib/storage'
 import type { AIAction, AIGraphEquation, ChatContext, GraphHandle, Tool, View, VizHandle, VizSpec, WhiteboardHandle } from './lib/types'
@@ -82,6 +83,9 @@ export default function App() {
   const stopRecording = async () => {
     const rec = await recorder.stop() // already added to recorder.recordings (shown immediately)
     setView('replay')
+    if (rec?.transcript?.length) {
+      rec.chapters = await generateChapters(rec.transcript) // auto-chapter from the transcript
+    }
     if (rec && auth.user) {
       setSaveNotice(null)
       const saved = await saveRecording(rec, auth.user.id)

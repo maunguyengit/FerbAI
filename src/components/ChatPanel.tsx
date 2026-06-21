@@ -3,6 +3,8 @@ import { AIError, fetchProviderStatus, streamChat, type ProviderStatus } from '.
 import { decodeSelection, getModel, getProvider } from '../lib/providers'
 import { getApiKey } from '../lib/storage'
 import { parseReply } from '../lib/drawblock'
+import { deepgramConfigured } from '../lib/deepgram/live'
+import { useVoiceDictation } from '../lib/deepgram/useVoiceDictation'
 import type { AIAction, AIGraphEquation, ChatContext, ChatMessage, View, VizSpec } from '../lib/types'
 import './ChatPanel.css'
 
@@ -28,6 +30,20 @@ export default function ChatPanel({
   const [input, setInput] = useState('')
   const [includeBoard, setIncludeBoard] = useState(true)
   const [aiActs, setAiActs] = useState(true)
+  const [voiceOn, setVoiceOn] = useState(false)
+
+  // voice dictation: holds the text typed before the mic was pressed, and
+  // appends the live transcript to it.
+  const dictatePrefixRef = useRef('')
+  const voice = useVoiceDictation((text) => {
+    const prefix = dictatePrefixRef.current
+    setInput(prefix ? `${prefix} ${text}` : text)
+  })
+  useEffect(() => { deepgramConfigured().then(setVoiceOn) }, [])
+  const toggleVoice = () => {
+    if (!voice.listening) dictatePrefixRef.current = input.trim()
+    voice.toggle()
+  }
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<ProviderStatus>({})
   const abortRef = useRef<AbortController | null>(null)
@@ -219,10 +235,18 @@ export default function ChatPanel({
           </label>
         </div>
         <div className="chat__inputrow">
+          {voiceOn && (
+            <button
+              className={`btn chat__mic ${voice.listening ? 'chat__mic--on' : ''}`}
+              onClick={toggleVoice}
+              title={voice.listening ? 'Stop dictation' : 'Talk to the AI'}
+              aria-label="voice input"
+            >{voice.listening ? '◉' : '🎙'}</button>
+          )}
           <textarea
             className="chat__input"
             value={input}
-            placeholder={onViz ? 'Ask me to teach you a concept…' : onGraph ? 'Ask me to graph something…' : "Ask about what's on the board…"}
+            placeholder={voice.listening ? 'Listening… speak now' : onViz ? 'Ask me to teach you a concept…' : onGraph ? 'Ask me to graph something…' : "Ask about what's on the board…"}
             rows={2}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
@@ -233,6 +257,7 @@ export default function ChatPanel({
             <button className="btn btn--accent chat__send" onClick={send} title="Send (Enter)">➤ Send</button>
           )}
         </div>
+        {voice.error && <p className="chat__voiceerr caption">{voice.error}</p>}
       </div>
     </aside>
   )

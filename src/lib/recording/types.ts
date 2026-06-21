@@ -14,6 +14,19 @@ export interface GraphEqSnap {
   color: string
 }
 
+/** A transcribed word aligned to the recording timeline (ms). */
+export interface TranscriptWord {
+  w: string
+  start: number
+  end: number
+}
+
+/** An auto-generated chapter (segment) of the lesson. */
+export interface Chapter {
+  t: number // start time, ms
+  title: string
+}
+
 /** The full reconstructable state of the content area at a moment in time. */
 export interface Scene {
   view: View
@@ -57,6 +70,8 @@ export interface Recording {
   durationMs: number
   events: SceneEvent[]
   snapshots: Snapshot[]
+  transcript?: TranscriptWord[]
+  chapters?: Chapter[]
   audioUrl?: string
   audioMime?: string
   demo?: boolean

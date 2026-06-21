@@ -3,12 +3,71 @@ import express from 'express'
 import cors from 'cors'
 import { PROVIDERS, SYSTEM_PROMPT, envKeyFor } from './providers.js'
 import { supabaseAdmin, supabaseEnabled, AUDIO_BUCKET } from './supabase.js'
+import { deepgramEnabled, mintTempKey } from './deepgram.js'
 
 const app = express()
 const PORT = process.env.PORT || 8787
 
 app.use(cors())
 app.use(express.json({ limit: '12mb' })) // board PNGs can be large
+
+// ---- Deepgram: is it configured + a short-lived browser token ----
+app.get('/api/deepgram/status', (_req, res) => res.json({ configured: deepgramEnabled }))
+
+app.get('/api/deepgram/token', async (_req, res) => {
+  if (!deepgramEnabled) return res.status(503).json({ error: 'Deepgram not configured.' })
+  try {
+    const { key, expiresIn } = await mintTempKey()
+    res.json({ key, expiresIn })
+  } catch (e) {
+    res.status(500).json({ error: e?.message || 'token error' })
+  }
+})
+
+// ---- auto-chapters: Claude segments a finished transcript into chapters ----
+app.post('/api/chapters', async (req, res) => {
+  const words = Array.isArray(req.body?.transcript) ? req.body.transcript : []
+  if (!words.length) return res.json({ chapters: [] })
+  const apiKey = envKeyFor('claude-code')
+  if (!apiKey) return res.json({ chapters: [] }) // no model key → skip chaptering
+
+  // build transcript text with [t=<ms>] markers ~ every 8s of speech
+  let text = ''
+  let lastStamp = -99999
+  for (const w of words) {
+    if (typeof w?.start !== 'number') continue
+    if (w.start - lastStamp > 8000) { text += ` [t=${Math.round(w.start)}]`; lastStamp = w.start }
+    text += ' ' + (w.w ?? '')
+  }
+  text = text.trim().slice(0, 16000)
+
+  const prompt = `You segment a lesson transcript into chapters, like Zoom. The transcript has [t=<ms>] time markers.
+Return ONLY JSON: {"chapters":[{"t":<ms integer>,"title":"<2-5 word topic>"}]}.
+Rules: 3-8 chapters, in time order, the first starting at t=0. Each "t" is a millisecond integer at or near a [t=] marker. Titles are short and describe that segment's topic.
+
+Transcript:
+${text}`
+
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
+    })
+    if (!r.ok) return res.json({ chapters: [] })
+    const body = await r.json()
+    const raw = body?.content?.[0]?.text ?? ''
+    const m = raw.match(/\{[\s\S]*\}/)
+    if (!m) return res.json({ chapters: [] })
+    const parsed = JSON.parse(m[0])
+    const chapters = Array.isArray(parsed?.chapters)
+      ? parsed.chapters.filter((c) => typeof c?.t === 'number' && typeof c?.title === 'string').sort((a, b) => a.t - b.t)
+      : []
+    res.json({ chapters })
+  } catch (e) {
+    res.json({ chapters: [], error: e?.message })
+  }
+})
 
 // ---- signed URL for a recording's audio (after verifying the listener) ----
 // The browser can read the recording row (RLS allows owner or shared), but the

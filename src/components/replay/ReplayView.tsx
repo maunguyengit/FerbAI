@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import PlaybackStage from './PlaybackStage'
+import ChapterThumb from './ChapterThumb'
 import { sceneAt, EMPTY_SCENE, type Recording, type Scene } from '../../lib/recording/types'
 import { contentBoundsOf } from '../../lib/render'
 import type { Element } from '../../lib/types'
@@ -56,9 +57,38 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, sel
   const playingRef = useRef(false)
   const lastCountRef = useRef(-1)
 
+  const [search, setSearch] = useState('')
+
   const bounds = useMemo(() => (rec ? recordingBounds(rec) : null), [rec])
   const duration = rec ? rec.durationMs : 0
   const hasAudio = !!audioSrc
+
+  const transcript = useMemo(() => rec?.transcript ?? [], [rec])
+  const chapters = useMemo(() => rec?.chapters ?? [], [rec])
+
+  // live caption: a sliding window of the most recent spoken words up to `now`
+  const caption = useMemo(() => {
+    if (!transcript.length) return ''
+    const upto = []
+    for (const w of transcript) { if (w.start <= curMs + 250) upto.push(w.w); else break }
+    return upto.slice(-14).join(' ')
+  }, [transcript, curMs])
+
+  // transcript search → clickable timestamps with a 10-word context snippet
+  const searchResults = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (q.length < 2 || !transcript.length) return []
+    const out: { t: number; snippet: string }[] = []
+    for (let i = 0; i < transcript.length; i++) {
+      if (transcript[i].w.toLowerCase().includes(q)) {
+        const from = Math.max(0, i - 5), to = Math.min(transcript.length, i + 6)
+        const snippet = transcript.slice(from, to).map((w, j) => (from + j === i ? `‹${w.w}›` : w.w)).join(' ')
+        out.push({ t: transcript[i].start, snippet })
+        if (out.length >= 40) break
+      }
+    }
+    return out
+  }, [search, transcript])
 
   const getNow = () => {
     if (hasAudio && audioRef.current) return audioRef.current.currentTime * 1000
@@ -113,9 +143,14 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, sel
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rec?.id])
 
-  // explicit select request from the app (just-recorded, or newest on login)
+  // explicit select request from the app (just-recorded, or newest on login).
+  // apply only when selectId actually changes, so it doesn't fight manual clicks.
+  const appliedSelectRef = useRef<string | null>(null)
   useEffect(() => {
-    if (selectId && recordings.some((r) => r.id === selectId)) setSelId(selectId)
+    if (selectId && selectId !== appliedSelectRef.current && recordings.some((r) => r.id === selectId)) {
+      appliedSelectRef.current = selectId
+      setSelId(selectId)
+    }
   }, [selectId, recordings])
 
   // keep selection valid; default to the first recording if none chosen
@@ -191,6 +226,7 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, sel
           <>
             <div className="replay__stage">
               <PlaybackStage scene={scene} boardBounds={bounds} />
+              {caption && <div className="replay__caption">{caption}</div>}
               {audioSrc && <audio ref={audioRef} src={audioSrc} preload="auto" onEnded={() => doPause(true)} />}
             </div>
             <div className="replay__transport">
@@ -218,6 +254,50 @@ export default function ReplayView({ recordings, canShare, loggedIn, notice, sel
           </div>
         )}
       </div>
+
+      {rec && (
+        <aside className="replay__chapters">
+          <h3 className="replay__title">Chapters</h3>
+          {chapters.length ? (
+            <ul className="chaplist">
+              {chapters.map((c, i) => (
+                <li key={i}>
+                  <button className="chap" onClick={() => seekTo(c.t)}>
+                    <ChapterThumb rec={rec} t={c.t} />
+                    <span className="chap__meta">
+                      <span className="chap__title">{c.title}</span>
+                      <span className="chap__time caption">{fmt(c.t)}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="replay__chapters-empty caption">No chapters — record with a mic (Deepgram on) to get an auto-transcript + chapters.</p>
+          )}
+
+          <div className="replay__search">
+            <span className="caption" style={{ display: 'block', marginBottom: 4 }}>Search transcript</span>
+            <input className="replay__searchinput" value={search} placeholder="find a word…"
+              onChange={(e) => setSearch(e.target.value)} disabled={!transcript.length} />
+            {searchResults.length > 0 && (
+              <ul className="searchres">
+                {searchResults.map((r, i) => (
+                  <li key={i}>
+                    <button className="sres" onClick={() => seekTo(r.t)}>
+                      <span className="sres__time caption">{fmt(r.t)}</span>
+                      <span className="sres__snip">{r.snippet}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {search.trim().length >= 2 && searchResults.length === 0 && transcript.length > 0 && (
+              <p className="caption" style={{ marginTop: 6 }}>no matches</p>
+            )}
+          </div>
+        </aside>
+      )}
     </div>
   )
 }
