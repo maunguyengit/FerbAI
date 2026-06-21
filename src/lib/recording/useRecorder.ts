@@ -98,6 +98,7 @@ export function useRecorder(): RecorderApi {
     // finalize audio
     let audioUrl: string | undefined
     let audioMime: string | undefined
+    let audioBlob: Blob | undefined
     const mr = mediaRef.current
     if (mr && mr.state !== 'inactive') {
       await new Promise<void>((resolve) => {
@@ -108,6 +109,7 @@ export function useRecorder(): RecorderApi {
         const blob = new Blob(chunksRef.current, { type: mr.mimeType || 'audio/webm' })
         audioUrl = URL.createObjectURL(blob)
         audioMime = blob.type
+        audioBlob = blob // kept transiently so it can be uploaded to storage
       }
     }
     streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -123,6 +125,8 @@ export function useRecorder(): RecorderApi {
       snapshots: snapsRef.current,
       audioUrl,
       audioMime,
+      audioBlob,
+      mine: true,
     }
     setRecordings((rs) => [rec, ...rs])
 

@@ -35,6 +35,17 @@ export interface Recording {
   audioMime?: string
   /** true for the bundled demo/test fixture */
   demo?: boolean
+  // ---- persistence (Supabase) ----
+  /** loaded from the database (vs. local/just-recorded) */
+  remote?: boolean
+  /** the owner flipped sharing on */
+  shared?: boolean
+  /** the signed-in user owns this recording */
+  mine?: boolean
+  /** storage object path for the audio (server resolves to a signed URL) */
+  audioPath?: string
+  /** transient: the recorded audio blob, before it's uploaded */
+  audioBlob?: Blob
 }
 
 export type RecorderStatus = 'idle' | 'recording'

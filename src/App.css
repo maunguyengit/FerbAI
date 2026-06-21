@@ -73,6 +73,7 @@
 .ready--off .ready__dot { background: var(--color-ink-soft); }
 
 .topbar__settings { width: 42px; height: 42px; padding: 0; font-size: var(--text-lg); }
+.topbar__signout { width: 42px; height: 42px; padding: 0; font-size: var(--text-lg); }
 
 /* ---- work area: left view | chat ---- */
 .app__work { flex: 1; display: flex; min-height: 0; }

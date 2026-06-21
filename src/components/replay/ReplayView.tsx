@@ -7,7 +7,13 @@ import './ReplayView.css'
 
 interface Props {
   recordings: Recording[]
-  onDelete: (id: string) => void
+  canShare: boolean
+  loggedIn: boolean
+  notice: string | null
+  onDelete: (id: string) => void | Promise<void>
+  onShare: (id: string) => Promise<string | null>
+  onOpenLink: (text: string) => Promise<{ ok: boolean; id?: string; error?: string }>
+  resolveAudio: (rec: Recording) => Promise<string | null>
 }
 
 const fmt = (ms: number) => {
@@ -15,7 +21,6 @@ const fmt = (ms: number) => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-// union bounds of every element that ever appears, so the camera never jumps
 function recordingBounds(rec: Recording) {
   const all: Element[] = []
   for (const s of rec.snapshots) all.push(...s.elements)
@@ -32,13 +37,17 @@ function countEventsLE(rec: Recording, t: number) {
   return lo
 }
 
-export default function ReplayView({ recordings, onDelete }: Props) {
+export default function ReplayView({ recordings, canShare, loggedIn, notice, onDelete, onShare, onOpenLink, resolveAudio }: Props) {
   const [selId, setSelId] = useState<string | null>(null)
   const rec = useMemo(() => recordings.find((r) => r.id === selId) ?? null, [recordings, selId])
 
   const [playing, setPlaying] = useState(false)
   const [curMs, setCurMs] = useState(0)
   const [elements, setElements] = useState<Element[]>([])
+  const [audioSrc, setAudioSrc] = useState<string | null>(null)
+  const [linkInput, setLinkInput] = useState('')
+  const [linkMsg, setLinkMsg] = useState<string | null>(null)
+  const [shareLink, setShareLink] = useState<string | null>(null)
 
   const audioRef = useRef<HTMLAudioElement>(null)
   const virt = useRef({ playing: false, base: 0, wall: 0 })
@@ -48,19 +57,14 @@ export default function ReplayView({ recordings, onDelete }: Props) {
 
   const bounds = useMemo(() => (rec ? recordingBounds(rec) : null), [rec])
   const duration = rec ? rec.durationMs : 0
+  const hasAudio = !!audioSrc
 
   const getNow = () => {
-    if (rec?.audioUrl && audioRef.current) return audioRef.current.currentTime * 1000
+    if (hasAudio && audioRef.current) return audioRef.current.currentTime * 1000
     const v = virt.current
     return v.playing ? v.base + (performance.now() - v.wall) : v.base
   }
-
-  const applyAt = (ms: number) => {
-    if (!rec) return
-    setElements(stateAt(rec, ms))
-    lastCountRef.current = countEventsLE(rec, ms)
-  }
-
+  const applyAt = (ms: number) => { if (rec) { setElements(stateAt(rec, ms)); lastCountRef.current = countEventsLE(rec, ms) } }
   const stopLoop = () => { if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null } }
 
   const loop = () => {
@@ -76,51 +80,60 @@ export default function ReplayView({ recordings, onDelete }: Props) {
   const doPlay = () => {
     if (!rec) return
     if (getNow() >= duration) seekTo(0)
-    if (rec.audioUrl && audioRef.current) { audioRef.current.play().catch(() => {}) }
+    if (hasAudio && audioRef.current) audioRef.current.play().catch(() => {})
     else { virt.current.playing = true; virt.current.wall = performance.now() }
-    playingRef.current = true
-    setPlaying(true)
-    stopLoop()
-    rafRef.current = requestAnimationFrame(loop)
+    playingRef.current = true; setPlaying(true)
+    stopLoop(); rafRef.current = requestAnimationFrame(loop)
   }
-
   const doPause = (atEnd = false) => {
-    if (rec?.audioUrl && audioRef.current) audioRef.current.pause()
+    if (hasAudio && audioRef.current) audioRef.current.pause()
     else { virt.current.base = atEnd ? duration : getNow(); virt.current.playing = false }
-    playingRef.current = false
-    setPlaying(false)
-    stopLoop()
+    playingRef.current = false; setPlaying(false); stopLoop()
     if (atEnd) setCurMs(duration)
   }
-
   const seekTo = (ms: number) => {
     if (!rec) return
     const clamped = Math.max(0, Math.min(duration, ms))
-    if (rec.audioUrl && audioRef.current) audioRef.current.currentTime = clamped / 1000
+    if (hasAudio && audioRef.current) audioRef.current.currentTime = clamped / 1000
     else { virt.current.base = clamped; virt.current.wall = performance.now() }
-    setCurMs(clamped)
-    applyAt(clamped)
+    setCurMs(clamped); applyAt(clamped)
   }
 
-  // load a recording
+  // load a recording (+ resolve its audio source)
   useEffect(() => {
-    stopLoop()
-    playingRef.current = false
-    setPlaying(false)
+    stopLoop(); playingRef.current = false; setPlaying(false)
     virt.current = { playing: false, base: 0, wall: 0 }
-    lastCountRef.current = -1
-    setCurMs(0)
-    if (rec) { setElements(stateAt(rec, 0)); if (audioRef.current) audioRef.current.currentTime = 0 }
-    else setElements([])
+    lastCountRef.current = -1; setCurMs(0); setShareLink(null); setAudioSrc(null)
+    if (rec) {
+      setElements(stateAt(rec, 0))
+      resolveAudio(rec).then((src) => setAudioSrc(src))
+    } else setElements([])
     return stopLoop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rec?.id])
 
-  // auto-select newest, and keep selection valid
+  // auto-select newest; keep selection valid
   useEffect(() => {
     if (recordings.length && (!selId || !recordings.some((r) => r.id === selId))) setSelId(recordings[0].id)
     if (!recordings.length) setSelId(null)
   }, [recordings, selId])
+
+  const doShare = async () => {
+    if (!rec) return
+    const link = await onShare(rec.id)
+    if (link) {
+      setShareLink(link)
+      try { await navigator.clipboard.writeText(link) } catch { /* clipboard may be blocked */ }
+    }
+  }
+
+  const submitLink = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLinkMsg(null)
+    const res = await onOpenLink(linkInput)
+    if (res.ok && res.id) { setSelId(res.id); setLinkInput(''); setLinkMsg(null) }
+    else setLinkMsg(res.error ?? 'Could not open that link.')
+  }
 
   return (
     <div className="replay">
@@ -129,21 +142,42 @@ export default function ReplayView({ recordings, onDelete }: Props) {
           <h3 className="replay__title">Recordings</h3>
           <span className="caption">{recordings.length}</span>
         </div>
-        {recordings.length === 0 ? (
-          <p className="replay__empty caption">No recordings yet. Hit <b>● Record</b> on the board to capture a lesson.</p>
-        ) : (
-          <ul className="replay__items">
-            {recordings.map((r) => (
-              <li key={r.id}>
-                <button className={`rec ${r.id === selId ? 'rec--on' : ''}`} onClick={() => setSelId(r.id)}>
-                  <span className="rec__name">{r.title}{r.demo && <span className="rec__tag">demo</span>}</span>
-                  <span className="rec__meta caption">{fmt(r.durationMs)} · {r.audioUrl ? '🎙' : 'silent'} · {r.events.length} ev</span>
-                </button>
-                {!r.demo && <button className="rec__del" onClick={() => onDelete(r.id)} title="Delete" aria-label="delete">×</button>}
-              </li>
-            ))}
-          </ul>
-        )}
+
+        {notice && <p className="replay__notice">{notice}</p>}
+
+        <div className="replay__items-wrap">
+          {recordings.length === 0 ? (
+            <p className="replay__empty caption">No recordings yet. Hit <b>● Record</b> on the board to capture a lesson.</p>
+          ) : (
+            <ul className="replay__items">
+              {recordings.map((r) => (
+                <li key={r.id}>
+                  <button className={`rec ${r.id === selId ? 'rec--on' : ''}`} onClick={() => setSelId(r.id)}>
+                    <span className="rec__name">
+                      {r.title}
+                      {r.demo && <span className="rec__tag">demo</span>}
+                      {loggedIn && !r.demo && !r.remote && <span className="rec__tag rec__tag--unsaved">unsaved</span>}
+                      {r.shared && <span className="rec__tag rec__tag--shared">shared</span>}
+                      {r.remote && !r.mine && <span className="rec__tag rec__tag--shared">shared with you</span>}
+                    </span>
+                    <span className="rec__meta caption">{fmt(r.durationMs)} · {r.audioPath || r.audioUrl ? '🎙' : 'silent'} · {r.events.length} ev</span>
+                  </button>
+                  {!r.demo && (r.mine || !r.remote) && <button className="rec__del" onClick={() => onDelete(r.id)} title="Delete" aria-label="delete">×</button>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <form className="replay__linkbar" onSubmit={submitLink}>
+          <span className="caption" style={{ display: 'block', marginBottom: 4 }}>Open a shared link</span>
+          <div className="replay__linkrow">
+            <input className="replay__linkinput" value={linkInput} placeholder="paste recording link…"
+              onChange={(e) => { setLinkInput(e.target.value); setLinkMsg(null) }} />
+            <button className="btn" type="submit">Open</button>
+          </div>
+          {linkMsg && <span className="replay__linkmsg">{linkMsg}</span>}
+        </form>
       </aside>
 
       <div className="replay__player">
@@ -151,29 +185,30 @@ export default function ReplayView({ recordings, onDelete }: Props) {
           <>
             <div className="replay__stage">
               <PlaybackCanvas elements={elements} bounds={bounds} />
-              {rec.audioUrl && <audio ref={audioRef} src={rec.audioUrl} preload="auto" onEnded={() => doPause(true)} />}
+              {audioSrc && <audio ref={audioRef} src={audioSrc} preload="auto" onEnded={() => doPause(true)} />}
             </div>
             <div className="replay__transport">
-              <button className="btn btn--accent replay__play" onClick={() => (playing ? doPause() : doPlay())}>
-                {playing ? '❚❚' : '▶'}
-              </button>
+              <button className="btn btn--accent replay__play" onClick={() => (playing ? doPause() : doPlay())}>{playing ? '❚❚' : '▶'}</button>
               <span className="replay__time caption">{fmt(curMs)}</span>
-              <input
-                className="replay__scrub"
-                type="range" min={0} max={duration} step={50}
-                value={Math.min(curMs, duration)}
-                onChange={(e) => seekTo(Number(e.target.value))}
-                aria-label="seek"
-              />
+              <input className="replay__scrub" type="range" min={0} max={duration} step={50}
+                value={Math.min(curMs, duration)} onChange={(e) => seekTo(Number(e.target.value))} aria-label="seek" />
               <span className="replay__time caption">{fmt(duration)}</span>
-              <span className={`replay__src caption ${rec.audioUrl ? 'is-audio' : ''}`}>{rec.audioUrl ? 'audio-synced' : 'silent'}</span>
+              {canShare && rec.mine && (
+                <button className="btn replay__share" onClick={doShare} title="Share this recording">⇪ Share</button>
+              )}
             </div>
+            {shareLink && (
+              <div className="replay__sharebar">
+                <span className="caption">link copied — anyone signed in can watch</span>
+                <input className="replay__linkinput" readOnly value={shareLink} onFocus={(e) => e.currentTarget.select()} />
+              </div>
+            )}
           </>
         ) : (
           <div className="replay__placeholder">
             <p className="replay__placeholder-big">Replay a lesson</p>
             <p>Record yourself teaching on the board — strokes, text, and the AI's
-              annotations replay in sync with your voice. Select a recording on the left.</p>
+              annotations replay in sync with your voice. Select a recording, or paste a shared link.</p>
           </div>
         )}
       </div>
