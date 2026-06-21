@@ -1,7 +1,11 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
-import { PROVIDERS, SYSTEM_PROMPT, envKeyFor } from './providers.js'
+import { PROVIDERS, SYSTEM_PROMPT, ASK_SYSTEM_PROMPT, envKeyFor } from './providers.js'
+import { WebSocketServer } from 'ws'
+import { LiveTranscriptionEvents } from '@deepgram/sdk'
+import { supabaseAdmin, supabaseEnabled, AUDIO_BUCKET } from './supabase.js'
+import { deepgramEnabled, dgClient, LIVE_OPTIONS } from './deepgram.js'
 import { formatTutorReview, messagesToTranscript, scoreTutorTranscript } from './tutorReview.js'
 import {
   appendMemoryEvent,
@@ -15,6 +19,153 @@ const PORT = process.env.PORT || 8787
 
 app.use(cors())
 app.use(express.json({ limit: '12mb' })) // board PNGs can be large
+
+// ---- Deepgram: configured check (the audio relay is a WebSocket, see below) ----
+app.get('/api/deepgram/status', (_req, res) => res.json({ configured: deepgramEnabled }))
+
+// ---- Ask the recording: student paused a lesson + asked a question ----
+app.post('/api/ask', async (req, res) => {
+  const { image, transcriptWindow, question } = req.body || {}
+  const apiKey = envKeyFor('claude-code')
+  if (!apiKey) return res.status(503).json({ error: 'No Claude key configured.' })
+
+  const content = []
+  if (image) {
+    try { const { mediaType, base64 } = splitDataUrl(image); content.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } }) } catch { /* skip image */ }
+  }
+  content.push({
+    type: 'text',
+    text: `Teacher's explanation around this moment:\n"""\n${(transcriptWindow || '(no transcript available for this moment)').slice(0, 4000)}\n"""\n\nStudent's question: "${(question || '').slice(0, 600)}"`,
+  })
+
+  res.set({ 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+  res.flushHeaders?.()
+  const abort = new AbortController()
+  res.on('close', () => { if (!res.writableEnded) abort.abort() })
+
+  try {
+    const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', signal: abort.signal,
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: ASK_SYSTEM_PROMPT, stream: true, messages: [{ role: 'user', content }] }),
+    })
+    if (!upstream.ok || !upstream.body) {
+      const detail = await readError(upstream)
+      res.write(`data: ${JSON.stringify({ error: `Claude ${upstream.status}: ${detail}` })}\n\n`)
+      return res.end()
+    }
+    await pumpSSE(upstream.body, (data) => {
+      if (data === '[DONE]') return
+      try {
+        const evt = JSON.parse(data)
+        if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') res.write(`data: ${JSON.stringify({ t: evt.delta.text })}\n\n`)
+        else if (evt.type === 'error') res.write(`data: ${JSON.stringify({ error: evt.error?.message || 'stream error' })}\n\n`)
+      } catch { /* */ }
+    })
+    res.write('data: [DONE]\n\n')
+    res.end()
+  } catch (e) {
+    if (abort.signal.aborted) return res.end()
+    res.write(`data: ${JSON.stringify({ error: e?.message || 'ask error' })}\n\n`)
+    res.end()
+  }
+})
+
+// ---- Text-to-speech (Deepgram Speak) for the AI's spoken answer ----
+app.post('/api/tts', async (req, res) => {
+  if (!deepgramEnabled) return res.status(503).json({ error: 'TTS not configured.' })
+  const text = (req.body?.text || '').toString().slice(0, 1800).trim()
+  if (!text) return res.status(400).json({ error: 'No text.' })
+  try {
+    const r = await fetch('https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mp3', {
+      method: 'POST',
+      headers: { authorization: `Token ${process.env.DEEPGRAM_API_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    })
+    if (!r.ok || !r.body) { const t = await r.text().catch(() => ''); return res.status(500).json({ error: t.slice(0, 200) || 'tts failed' }) }
+    res.set('content-type', 'audio/mpeg')
+    const reader = r.body.getReader()
+    for (;;) { const { value, done } = await reader.read(); if (done) break; res.write(Buffer.from(value)) }
+    res.end()
+  } catch (e) {
+    res.status(500).json({ error: e?.message || 'tts error' })
+  }
+})
+
+// ---- auto-chapters: Claude segments a finished transcript into chapters ----
+app.post('/api/chapters', async (req, res) => {
+  const words = Array.isArray(req.body?.transcript) ? req.body.transcript : []
+  if (!words.length) return res.json({ chapters: [] })
+  const apiKey = envKeyFor('claude-code')
+  if (!apiKey) return res.json({ chapters: [] }) // no model key → skip chaptering
+
+  // build transcript text with [t=<ms>] markers ~ every 8s of speech
+  let text = ''
+  let lastStamp = -99999
+  for (const w of words) {
+    if (typeof w?.start !== 'number') continue
+    if (w.start - lastStamp > 8000) { text += ` [t=${Math.round(w.start)}]`; lastStamp = w.start }
+    text += ' ' + (w.w ?? '')
+  }
+  text = text.trim().slice(0, 16000)
+
+  const prompt = `You segment a lesson transcript into chapters, like Zoom. The transcript has [t=<ms>] time markers.
+Return ONLY JSON: {"chapters":[{"t":<ms integer>,"title":"<2-5 word topic>"}]}.
+Rules: 3-8 chapters, in time order, the first starting at t=0. Each "t" is a millisecond integer at or near a [t=] marker. Titles are short and describe that segment's topic.
+
+Transcript:
+${text}`
+
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
+    })
+    if (!r.ok) return res.json({ chapters: [] })
+    const body = await r.json()
+    const raw = body?.content?.[0]?.text ?? ''
+    const m = raw.match(/\{[\s\S]*\}/)
+    if (!m) return res.json({ chapters: [] })
+    const parsed = JSON.parse(m[0])
+    const chapters = Array.isArray(parsed?.chapters)
+      ? parsed.chapters.filter((c) => typeof c?.t === 'number' && typeof c?.title === 'string').sort((a, b) => a.t - b.t)
+      : []
+    res.json({ chapters })
+  } catch (e) {
+    res.json({ chapters: [], error: e?.message })
+  }
+})
+
+// ---- signed URL for a recording's audio (after verifying the listener) ----
+// The browser can read the recording row (RLS allows owner or shared), but the
+// audio bucket is private. This endpoint verifies the caller's Supabase token,
+// re-checks owner/shared with service_role, then issues a short-lived URL.
+app.post('/api/recordings/audio-url', async (req, res) => {
+  if (!supabaseEnabled || !supabaseAdmin) return res.status(503).json({ error: 'Storage not configured.' })
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+  const recordingId = req.body?.recordingId
+  if (!token) return res.status(401).json({ error: 'Not signed in.' })
+  if (!recordingId) return res.status(400).json({ error: 'Missing recordingId.' })
+  try {
+    const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(token)
+    if (userErr || !userData?.user) return res.status(401).json({ error: 'Invalid session.' })
+    const uid = userData.user.id
+
+    const { data: rec, error: recErr } = await supabaseAdmin
+      .from('recordings').select('owner, shared, audio_path').eq('id', recordingId).single()
+    if (recErr || !rec) return res.status(404).json({ error: 'Recording not found.' })
+    if (rec.owner !== uid && !rec.shared) return res.status(403).json({ error: 'Not allowed.' })
+    if (!rec.audio_path) return res.json({ url: null }) // silent recording
+
+    const { data: signed, error: signErr } = await supabaseAdmin
+      .storage.from(AUDIO_BUCKET).createSignedUrl(rec.audio_path, 3600)
+    if (signErr) return res.status(500).json({ error: signErr.message })
+    res.json({ url: signed.signedUrl })
+  } catch (e) {
+    res.status(500).json({ error: e?.message || 'audio url error' })
+  }
+})
 
 // ---- which providers have a key configured (env), for the UI status chips ----
 app.get('/api/providers', (_req, res) => {
@@ -418,6 +569,31 @@ const httpServer = app.listen(PORT, () => {
   console.log(`\n  FerbAI proxy → http://localhost:${PORT}`)
   console.log(`  keys from .env: ${configured.length ? configured.join(', ') : '(none — paste in Settings)'}\n`)
 })
+
+// ---- Deepgram audio relay ----
+// The browser streams mic audio here; we forward it to Deepgram with the
+// server-held key and relay transcripts back. Avoids needing browser tokens.
+const dgWss = new WebSocketServer({ server: httpServer, path: '/api/deepgram/stream' })
+dgWss.on('connection', (client) => {
+  if (!deepgramEnabled || !dgClient) { client.close(); return }
+  const dg = dgClient.listen.live(LIVE_OPTIONS)
+  let dgOpen = false
+  const queue = []
+  const flush = () => { while (queue.length) dg.send(queue.shift()) }
+
+  dg.on(LiveTranscriptionEvents.Open, () => { dgOpen = true; flush(); safeSend(client, { type: 'open' }) })
+  dg.on(LiveTranscriptionEvents.Transcript, (data) => safeSend(client, { type: 'transcript', data }))
+  dg.on(LiveTranscriptionEvents.Error, (e) => safeSend(client, { type: 'error', error: String(e?.message || e) }))
+  dg.on(LiveTranscriptionEvents.Close, () => { try { client.close() } catch { /* */ } })
+
+  client.on('message', (chunk) => {
+    if (dgOpen) dg.send(chunk)
+    else queue.push(chunk)
+  })
+  client.on('close', () => { try { dg.requestClose() } catch { /* */ } })
+  client.on('error', () => { try { dg.requestClose() } catch { /* */ } })
+})
+function safeSend(ws, obj) { try { if (ws.readyState === 1) ws.send(JSON.stringify(obj)) } catch { /* */ } }
 
 httpServer.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {

@@ -36,18 +36,33 @@ You don't strictly need a `.env` — you can paste keys into the in-app
 4. **Ask →**. With *attach board snapshot* on, the AI gets a PNG of your drawing
    and nudges you toward the next step (Socratic — not the full answer).
 
-## Models & providers
+## Models
 
-| Provider (dropdown group) | API style | Models |
-| --- | --- | --- |
-| **Claude Code** | Anthropic | Opus 4.8 · Sonnet 4.6 · Haiku 4.5 |
-| **DeepSeek** | OpenAI-compatible | DeepSeek V3 · DeepSeek R1 |
-| **OpenCode Go plan** | OpenAI-compatible | MiniMax M3 · Kimi K2.6 · GLM · Qwen |
+The chat runs on **Claude Code** (Anthropic). Pick the model in the top-bar
+dropdown — **Claude Sonnet 4.6** (default) · Claude Opus 4.8 · Claude Haiku 4.5.
+The Base URL is editable in Settings. Models live in
+[`src/lib/providers.ts`](src/lib/providers.ts).
 
-Each provider's **Base URL** is editable in Settings, so you can point the
-OpenAI-compatible groups at any gateway (OpenRouter, a self-hosted proxy, the
-real OpenCode Go endpoint, etc.). Adjust model IDs in
-[`src/lib/providers.ts`](src/lib/providers.ts) to match your gateway.
+## Record & replay a lesson (▶ Replay)
+
+Hit **● Record** (top bar) to capture a lesson, then **Stop**. Everything you do
+on the board — strokes, text, shapes, erases, undo/redo, and the AI's
+annotations — is logged as timestamped events; the microphone is captured in
+parallel via `MediaRecorder` (optional — if there's no mic, the lesson records
+silently). Open the **▶ Replay** tab to watch it back.
+
+**The engine** ([`src/lib/recording/`](src/lib/recording/)): a recording is an
+incremental **event log** (for smooth playback) + periodic **snapshots** (full
+board state every 30s, for instant seeking). Playback is a `requestAnimationFrame`
+loop driven by the audio clock (`audio.currentTime`) — or a virtual clock when
+silent — applying events as their timestamps pass. **Seeking** to time *T* finds
+the nearest snapshot ≤ *T* and fast-forwards events from there, so scrubbing is
+instant regardless of lesson length. The live board and the playback canvas share
+one renderer ([`src/lib/render.ts`](src/lib/render.ts)) so replays are
+pixel-identical.
+
+> Recordings are in-memory for the session (audio as an object URL). Persistence
+> (IndexedDB) and Deepgram live transcription are later phases.
 
 ## Learn window — interactive lessons the AI builds (not videos)
 

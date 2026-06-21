@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { getWidget } from '../../lib/viz/registry'
 import type { VizHandle, VizSpec } from '../../lib/types'
 import './VisualizationView.css'
@@ -11,10 +11,19 @@ const STARTERS: { label: string; spec: VizSpec }[] = [
   { label: 'Selection sort', spec: { widget: 'sorting', title: 'Selection Sort', intro: 'Pick the smallest remaining item and place it.', data: { array: [7, 3, 9, 2, 8, 4, 6, 1, 5] }, config: { algorithm: 'selection' } } },
 ]
 
-const VisualizationView = forwardRef<VizHandle, object>(function VisualizationView(_props, ref) {
+interface VizViewProps {
+  /** report spec changes so a recording can capture the learn window */
+  onSpecChange?: (spec: VizSpec | null) => void
+}
+
+const VisualizationView = forwardRef<VizHandle, VizViewProps>(function VisualizationView({ onSpecChange }, ref) {
   const [spec, setSpec] = useState<VizSpec | null>(null)
   const specRef = useRef<VizSpec | null>(null)
   specRef.current = spec
+  const onSpecChangeRef = useRef(onSpecChange)
+  onSpecChangeRef.current = onSpecChange
+
+  useEffect(() => { onSpecChangeRef.current?.(spec) }, [spec])
 
   useImperativeHandle(ref, (): VizHandle => ({
     render: (s) => setSpec(s),

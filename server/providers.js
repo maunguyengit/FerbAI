@@ -9,31 +9,9 @@ export const PROVIDERS = {
     defaultBaseUrl: 'https://api.anthropic.com',
     envKey: 'ANTHROPIC_API_KEY',
     models: {
-      'claude-opus-4-8': { vision: true },
       'claude-sonnet-4-6': { vision: true },
+      'claude-opus-4-8': { vision: true },
       'claude-haiku-4-5-20251001': { vision: true },
-    },
-  },
-  deepseek: {
-    label: 'DeepSeek',
-    type: 'openai',
-    defaultBaseUrl: 'https://api.deepseek.com',
-    envKey: 'DEEPSEEK_API_KEY',
-    models: {
-      'deepseek-chat': { vision: false },
-      'deepseek-reasoner': { vision: false },
-    },
-  },
-  'opencode-go': {
-    label: 'OpenCode Go plan',
-    type: 'openai',
-    defaultBaseUrl: 'https://opencode.ai/v1',
-    envKey: 'OPENCODE_API_KEY',
-    models: {
-      'minimax-m3': { vision: true },
-      'kimi-k2.6': { vision: true },
-      'glm-4.6': { vision: true },
-      'qwen-max': { vision: true },
     },
   },
 }
@@ -101,3 +79,16 @@ export function envKeyFor(providerId) {
   const p = PROVIDERS[providerId]
   return p ? process.env[p.envKey] || '' : ''
 }
+
+// Prompt for "ask the recording": a student paused a recorded lesson to ask.
+export const ASK_SYSTEM_PROMPT = `You are a warm, sharp AI teaching assistant. A student is watching a RECORDED whiteboard lesson and has PAUSED to ask you a question. You are shown the current (frozen) board, the teacher's spoken explanation around this moment, and the student's question.
+
+Answer the student's question directly and clearly in a natural SPOKEN style — your words will be read aloud. Keep it tight: 2-5 sentences. Reference what's actually on the board and what the teacher was saying. Don't restate the question.
+
+If a quick drawing on the board would clarify, add annotations by emitting EXACTLY ONE fenced code block tagged ferbai-draw with JSON: {"actions":[ ... ]}. The block is rendered onto the board, not shown as text — keep your spoken answer OUTSIDE the block.
+Action kinds:
+- {"kind":"text","x":N,"y":N,"text":"...","size":26}
+- {"kind":"arrow","x1":N,"y1":N,"x2":N,"y2":N}   (point at something)
+- {"kind":"highlight","x":N,"y":N,"w":N,"h":N}   (circle/mark a spot on the teacher's work)
+- {"kind":"line"/"rect"/"ellipse", ...}
+Coordinates are PIXELS in the board image you're shown (origin top-left, y down). Your marks are automatically drawn in BLUE so the student can tell them apart from the teacher's work — you do NOT need to set color. Place marks near the relevant spot; don't cover the teacher's writing. If no drawing helps, omit the block.`

@@ -3,12 +3,21 @@ import Whiteboard from './components/Whiteboard'
 import Toolbar from './components/Toolbar'
 import GraphView from './components/GraphView'
 import VisualizationView from './components/viz/VisualizationView'
+import ReplayView from './components/replay/ReplayView'
+import RecordControl from './components/RecordControl'
 import ChatPanel from './components/ChatPanel'
 import ModelSelector from './components/ModelSelector'
 import SettingsModal from './components/SettingsModal'
+import AuthGate from './components/auth/AuthGate'
+import { useAuth } from './lib/supabase/useAuth'
 import { fetchProviderStatus } from './lib/ai'
 import { DEFAULT_SELECTION } from './lib/providers'
 import { catalogForPrompt } from './lib/viz/registry'
+import { useRecorder } from './lib/recording/useRecorder'
+import { DEMO_RECORDING } from './lib/recording/demoRecording'
+import { deleteRemote, fetchAudioUrl, getById, listMine, parseShareLink, saveRecording, setShared, shareLinkFor } from './lib/recording/store'
+import { generateChapters } from './lib/recording/chapters'
+import type { GraphEqSnap, Recording, Scene } from './lib/recording/types'
 import { getSelection, setSelection as persistSelection } from './lib/storage'
 import type { AIAction, AIGraphEquation, ChatContext, GraphHandle, Tool, View, VizHandle, VizSpec, WhiteboardHandle } from './lib/types'
 import './App.css'
@@ -30,6 +39,112 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [keysVersion, setKeysVersion] = useState(0)
   const [ready, setReady] = useState(false)
+  const [chatOpen, setChatOpen] = useState(true)
+
+  const auth = useAuth()
+  const recorder = useRecorder()
+
+  // cloud (DB) recordings for the signed-in user + any shared ones opened by link
+  const [cloud, setCloud] = useState<Recording[]>([])
+  const [opened, setOpened] = useState<Recording[]>([])
+  const [selectId, setSelectId] = useState<string | null>(null) // recording to auto-select in Replay
+
+  // live content of each window, kept in refs so the recorder can snapshot the
+  // whole scene (board + graph + learn) at any moment.
+  const viewRef = useRef<View>('board')
+  const graphEqsRef = useRef<GraphEqSnap[]>([])
+  const vizSpecRef = useRef<VizSpec | null>(null)
+  viewRef.current = view
+
+  const getScene = (): Scene => ({
+    view: viewRef.current,
+    elements: wbRef.current?.getElements() ?? [],
+    equations: graphEqsRef.current,
+    viz: vizSpecRef.current,
+  })
+
+  // record window switches + each window's content changes (while recording)
+  const recordEvent = recorder.recordEvent // stable (useCallback)
+  useEffect(() => { recordEvent({ type: 'view', view }) }, [view, recordEvent])
+  const onGraphEquations = (eqs: GraphEqSnap[]) => { graphEqsRef.current = eqs; recordEvent({ type: 'graph', equations: eqs }) }
+  const onVizSpec = (spec: VizSpec | null) => { vizSpecRef.current = spec; recordEvent({ type: 'viz', spec }) }
+
+  // load the user's saved recordings on sign-in
+  useEffect(() => {
+    if (auth.user) listMine(auth.user.id).then((recs) => { setCloud(recs); if (recs.length) setSelectId(recs[0].id) })
+    else { setCloud([]); setOpened([]) }
+  }, [auth.user?.id, auth.user])
+
+  const startRecording = () => {
+    recorder.start({ title: `Lesson ${(auth.user ? cloud.length : recorder.recordings.length) + 1}`, getScene })
+  }
+
+  const [saveNotice, setSaveNotice] = useState<string | null>(null)
+
+  const stopRecording = async () => {
+    const rec = await recorder.stop() // already added to recorder.recordings (shown immediately)
+    setView('replay')
+    if (rec?.transcript?.length) {
+      rec.chapters = await generateChapters(rec.transcript) // auto-chapter from the transcript
+    }
+    if (rec && auth.user) {
+      setSaveNotice(null)
+      const saved = await saveRecording(rec, auth.user.id)
+      if (saved) {
+        setCloud((c) => [saved, ...c])
+        recorder.remove(rec.id) // drop the local copy now that the saved one is shown
+        setSelectId(saved.id)
+      } else {
+        setSaveNotice("Couldn't save to your account — it's kept locally for now. Did you run the SQL migration in Supabase?")
+        setSelectId(rec.id)
+      }
+    } else if (rec) {
+      setSelectId(rec.id)
+    }
+  }
+
+  // the list shown in Replay: newest user recordings first (so a just-recorded
+  // lesson is auto-selected), then the bundled demo last.
+  const replayRecordings: Recording[] = (() => {
+    const seen = new Set<string>()
+    const out: Recording[] = []
+    for (const r of [...opened, ...cloud, ...recorder.recordings.filter((r) => !r.demo), DEMO_RECORDING]) {
+      if (seen.has(r.id)) continue
+      seen.add(r.id); out.push(r)
+    }
+    return out
+  })()
+
+  const onDeleteRecording = async (id: string) => {
+    const rec = replayRecordings.find((r) => r.id === id)
+    if (rec?.remote) { await deleteRemote(rec); setCloud((c) => c.filter((r) => r.id !== id)) }
+    else recorder.remove(id)
+    setOpened((o) => o.filter((r) => r.id !== id))
+  }
+
+  const onShareRecording = async (id: string): Promise<string | null> => {
+    const ok = await setShared(id, true)
+    if (!ok) return null
+    setCloud((c) => c.map((r) => (r.id === id ? { ...r, shared: true } : r)))
+    return shareLinkFor(id)
+  }
+
+  const onOpenLink = async (text: string): Promise<{ ok: boolean; id?: string; error?: string }> => {
+    const id = parseShareLink(text)
+    if (!id) return { ok: false, error: 'That doesn’t look like a recording link.' }
+    if (replayRecordings.some((r) => r.id === id)) return { ok: true, id }
+    const rec = await getById(id)
+    if (!rec) return { ok: false, error: 'Recording not found, or it isn’t shared.' }
+    setOpened((o) => [rec, ...o.filter((r) => r.id !== id)])
+    return { ok: true, id }
+  }
+
+  // resolve the audio source for the player (local URL or signed URL for remote)
+  const resolveAudio = async (rec: Recording): Promise<string | null> => {
+    if (rec.audioUrl) return rec.audioUrl
+    if (rec.remote && rec.audioPath) return await fetchAudioUrl(rec.id)
+    return null
+  }
 
   useEffect(() => { persistSelection(selection) }, [selection])
 
@@ -80,9 +195,11 @@ export default function App() {
     { id: 'board', label: '✎ Board' },
     { id: 'graph', label: '∿ Graph' },
     { id: 'viz', label: '◆ Learn' },
+    { id: 'replay', label: '▶ Replay' },
   ]
 
   return (
+    <AuthGate auth={auth}>
     <div className="app">
       <header className="topbar">
         <div className="topbar__brand">
@@ -111,10 +228,26 @@ export default function App() {
         </div>
 
         <div className="topbar__right">
+          <RecordControl
+            status={recorder.status}
+            elapsedMs={recorder.elapsedMs}
+            hasAudio={recorder.hasAudio}
+            onStart={startRecording}
+            onStop={stopRecording}
+          />
           <span className={`ready ${ready ? 'ready--on' : 'ready--off'}`}>
             <span className="ready__dot" /> {ready ? 'ready' : 'offline'}
           </span>
+          <button
+            className={`btn topbar__chat ${chatOpen ? 'is-on' : ''}`}
+            onClick={() => setChatOpen((o) => !o)}
+            title={chatOpen ? 'Hide the Tutor panel' : 'Show the Tutor panel'}
+            aria-pressed={chatOpen}
+          >✦ Tutor</button>
           <button className="btn topbar__settings" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="API settings">⚙</button>
+          {!auth.localMode && auth.user && (
+            <button className="btn topbar__signout" onClick={() => auth.signOut()} title={`Sign out ${auth.user.email ?? ''}`}>⏻</button>
+          )}
         </div>
       </header>
 
@@ -136,20 +269,36 @@ export default function App() {
                 ref={wbRef}
                 tool={tool} color={color} width={width}
                 onHistoryChange={(u, r) => { setCanUndo(u); setCanRedo(r) }}
+                onBoardEvent={recorder.recordEvent}
               />
             </div>
           </div>
 
           <div className={`app__graph ${view === 'graph' ? '' : 'is-hidden'}`}>
-            <GraphView ref={graphRef} />
+            <GraphView ref={graphRef} onEquationsChange={onGraphEquations} />
           </div>
 
           <div className={`app__viz ${view === 'viz' ? '' : 'is-hidden'}`}>
-            <VisualizationView ref={vizRef} />
+            <VisualizationView ref={vizRef} onSpecChange={onVizSpec} />
+          </div>
+
+          <div className={`app__replay ${view === 'replay' ? '' : 'is-hidden'}`}>
+            <ReplayView
+              recordings={replayRecordings}
+              canShare={!!auth.user}
+              loggedIn={!!auth.user}
+              notice={saveNotice}
+              selectId={selectId}
+              onDelete={onDeleteRecording}
+              onShare={onShareRecording}
+              onOpenLink={onOpenLink}
+              resolveAudio={resolveAudio}
+            />
           </div>
         </section>
 
         <ChatPanel
+          open={chatOpen}
           selection={selection}
           view={view}
           getActiveImage={getActiveImage}
@@ -164,5 +313,6 @@ export default function App() {
 
       <SettingsModal open={settingsOpen} onClose={closeSettings} />
     </div>
+    </AuthGate>
   )
 }
