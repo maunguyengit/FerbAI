@@ -35,6 +35,21 @@ const SESSION_KEY = 'ferbai.sessionId'
 const USER_KEY = 'ferbai.userId'
 const newSessionId = () => `session_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
 const newUserId = () => `user_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+const TRIVIAL_QUESTION_RE = /\b(hi|hello|hey|yo|sup|what'?s up|how are you|who are you|are you there)\b/i
+const LEARNING_QUESTION_RE =
+  /\b(how|why|what|when|where|which|can|could|would|should|help|explain|teach|show|solve|factor|graph|plot|derive|differentiate|integrate|prove|find|calculate|simplify|balance|compare|walk me through)\b/i
+
+function hasLegitimateQuestion(messages: ChatMessage[]) {
+  return messages.some((message) => {
+    if (message.role !== 'user' || message.pending || message.error) return false
+    const text = String(message.text || '').replace(/\([^)]*\)/g, ' ').trim()
+    if (!text) return false
+    const words = text.match(/[A-Za-z0-9]+/g) || []
+    if (words.length < 3) return false
+    if (TRIVIAL_QUESTION_RE.test(text) && words.length <= 5) return false
+    return text.includes('?') || LEARNING_QUESTION_RE.test(text)
+  })
+}
 const getSessionId = () => {
   const existing = localStorage.getItem(SESSION_KEY)
   if (existing) return existing
@@ -114,8 +129,27 @@ export default function ChatPanel({
     const controller = new AbortController()
     abortRef.current = controller
     const summaryMsg: ChatMessage = { id: mid(), role: 'assistant', text: '', pending: true }
+    const sessionMessages = messages.filter((m) => !m.pending)
+    const shouldReview = hasLegitimateQuestion(sessionMessages)
     setMessages((m) => [...m, summaryMsg])
     try {
+      let reviewSummary = ''
+      let reviewError = ''
+      if (shouldReview) {
+        try {
+          const review = await reviewTutorSession({
+            sessionId,
+            userId,
+            history: sessionMessages,
+            context: getContext(),
+            signal: controller.signal,
+          })
+          reviewSummary = review.summary
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') throw err
+          reviewError = err instanceof Error ? err.message : 'Agent 2 review failed.'
+        }
+      }
       const { summary } = await finalizeMemorySession({
         sessionId,
         userId,
@@ -132,6 +166,8 @@ export default function ChatPanel({
                 ...x,
                 pending: false,
                 text:
+                  `${shouldReview ? 'Agent 2 review saved.\n\n' : 'Agent 2 review skipped: no substantive student question found.\n\n'}` +
+                  (reviewSummary ? `${reviewSummary}\n\n` : reviewError ? `Agent 2 review could not be saved: ${reviewError}\n\n` : '') +
                   `Session memory saved.\n\n${summary.rolling}` +
                   (summary.nextRecommendedStep ? `\n\nNext: ${summary.nextRecommendedStep}` : ''),
               }

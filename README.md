@@ -170,7 +170,10 @@ FerbAI now keeps a lightweight two-agent tutoring loop:
    evaluator ([`server/tutorReview.js`](server/tutorReview.js)) over the transcript,
    board state, and lesson goal. It scores engagement, diagnosis, scaffolding,
    board grounding, tone, and goal alignment, then writes its risks and
-   recommendations back into memory as Agent 2 review summaries.
+   recommendations back into memory as Agent 2 review summaries. **End Session**
+   also triggers Agent 2 automatically when the session contains at least one
+   substantive student question or learning request; greetings like "hi" are
+   skipped so empty sessions do not produce noisy reviews.
 
 Before each Agent 1 response, the backend builds a memory packet for the current
 session ([`getAgentMemoryPacket`](server/memory.js)): recent events, the current
