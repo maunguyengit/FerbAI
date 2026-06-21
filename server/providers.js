@@ -9,31 +9,9 @@ export const PROVIDERS = {
     defaultBaseUrl: 'https://api.anthropic.com',
     envKey: 'ANTHROPIC_API_KEY',
     models: {
-      'claude-opus-4-8': { vision: true },
       'claude-sonnet-4-6': { vision: true },
+      'claude-opus-4-8': { vision: true },
       'claude-haiku-4-5-20251001': { vision: true },
-    },
-  },
-  deepseek: {
-    label: 'DeepSeek',
-    type: 'openai',
-    defaultBaseUrl: 'https://api.deepseek.com',
-    envKey: 'DEEPSEEK_API_KEY',
-    models: {
-      'deepseek-chat': { vision: false },
-      'deepseek-reasoner': { vision: false },
-    },
-  },
-  'opencode-go': {
-    label: 'OpenCode Go plan',
-    type: 'openai',
-    defaultBaseUrl: 'https://opencode.ai/v1',
-    envKey: 'OPENCODE_API_KEY',
-    models: {
-      'minimax-m3': { vision: true },
-      'kimi-k2.6': { vision: true },
-      'glm-4.6': { vision: true },
-      'qwen-max': { vision: true },
     },
   },
 }
