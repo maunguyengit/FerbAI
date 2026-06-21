@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
-import { PROVIDERS, SYSTEM_PROMPT, envKeyFor } from './providers.js'
+import { PROVIDERS, SYSTEM_PROMPT, ASK_SYSTEM_PROMPT, envKeyFor } from './providers.js'
 import { WebSocketServer } from 'ws'
 import { LiveTranscriptionEvents } from '@deepgram/sdk'
 import { supabaseAdmin, supabaseEnabled, AUDIO_BUCKET } from './supabase.js'
@@ -15,6 +15,75 @@ app.use(express.json({ limit: '12mb' })) // board PNGs can be large
 
 // ---- Deepgram: configured check (the audio relay is a WebSocket, see below) ----
 app.get('/api/deepgram/status', (_req, res) => res.json({ configured: deepgramEnabled }))
+
+// ---- Ask the recording: student paused a lesson + asked a question ----
+app.post('/api/ask', async (req, res) => {
+  const { image, transcriptWindow, question } = req.body || {}
+  const apiKey = envKeyFor('claude-code')
+  if (!apiKey) return res.status(503).json({ error: 'No Claude key configured.' })
+
+  const content = []
+  if (image) {
+    try { const { mediaType, base64 } = splitDataUrl(image); content.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } }) } catch { /* skip image */ }
+  }
+  content.push({
+    type: 'text',
+    text: `Teacher's explanation around this moment:\n"""\n${(transcriptWindow || '(no transcript available for this moment)').slice(0, 4000)}\n"""\n\nStudent's question: "${(question || '').slice(0, 600)}"`,
+  })
+
+  res.set({ 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+  res.flushHeaders?.()
+  const abort = new AbortController()
+  res.on('close', () => { if (!res.writableEnded) abort.abort() })
+
+  try {
+    const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', signal: abort.signal,
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: ASK_SYSTEM_PROMPT, stream: true, messages: [{ role: 'user', content }] }),
+    })
+    if (!upstream.ok || !upstream.body) {
+      const detail = await readError(upstream)
+      res.write(`data: ${JSON.stringify({ error: `Claude ${upstream.status}: ${detail}` })}\n\n`)
+      return res.end()
+    }
+    await pumpSSE(upstream.body, (data) => {
+      if (data === '[DONE]') return
+      try {
+        const evt = JSON.parse(data)
+        if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') res.write(`data: ${JSON.stringify({ t: evt.delta.text })}\n\n`)
+        else if (evt.type === 'error') res.write(`data: ${JSON.stringify({ error: evt.error?.message || 'stream error' })}\n\n`)
+      } catch { /* */ }
+    })
+    res.write('data: [DONE]\n\n')
+    res.end()
+  } catch (e) {
+    if (abort.signal.aborted) return res.end()
+    res.write(`data: ${JSON.stringify({ error: e?.message || 'ask error' })}\n\n`)
+    res.end()
+  }
+})
+
+// ---- Text-to-speech (Deepgram Speak) for the AI's spoken answer ----
+app.post('/api/tts', async (req, res) => {
+  if (!deepgramEnabled) return res.status(503).json({ error: 'TTS not configured.' })
+  const text = (req.body?.text || '').toString().slice(0, 1800).trim()
+  if (!text) return res.status(400).json({ error: 'No text.' })
+  try {
+    const r = await fetch('https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mp3', {
+      method: 'POST',
+      headers: { authorization: `Token ${process.env.DEEPGRAM_API_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    })
+    if (!r.ok || !r.body) { const t = await r.text().catch(() => ''); return res.status(500).json({ error: t.slice(0, 200) || 'tts failed' }) }
+    res.set('content-type', 'audio/mpeg')
+    const reader = r.body.getReader()
+    for (;;) { const { value, done } = await reader.read(); if (done) break; res.write(Buffer.from(value)) }
+    res.end()
+  } catch (e) {
+    res.status(500).json({ error: e?.message || 'tts error' })
+  }
+})
 
 // ---- auto-chapters: Claude segments a finished transcript into chapters ----
 app.post('/api/chapters', async (req, res) => {
