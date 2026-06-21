@@ -49,6 +49,27 @@ OpenAI-compatible groups at any gateway (OpenRouter, a self-hosted proxy, the
 real OpenCode Go endpoint, etc.). Adjust model IDs in
 [`src/lib/providers.ts`](src/lib/providers.ts) to match your gateway.
 
+## Record & replay a lesson (▶ Replay)
+
+Hit **● Record** (top bar) to capture a lesson, then **Stop**. Everything you do
+on the board — strokes, text, shapes, erases, undo/redo, and the AI's
+annotations — is logged as timestamped events; the microphone is captured in
+parallel via `MediaRecorder` (optional — if there's no mic, the lesson records
+silently). Open the **▶ Replay** tab to watch it back.
+
+**The engine** ([`src/lib/recording/`](src/lib/recording/)): a recording is an
+incremental **event log** (for smooth playback) + periodic **snapshots** (full
+board state every 30s, for instant seeking). Playback is a `requestAnimationFrame`
+loop driven by the audio clock (`audio.currentTime`) — or a virtual clock when
+silent — applying events as their timestamps pass. **Seeking** to time *T* finds
+the nearest snapshot ≤ *T* and fast-forwards events from there, so scrubbing is
+instant regardless of lesson length. The live board and the playback canvas share
+one renderer ([`src/lib/render.ts`](src/lib/render.ts)) so replays are
+pixel-identical.
+
+> Recordings are in-memory for the session (audio as an object URL). Persistence
+> (IndexedDB) and Deepgram live transcription are later phases.
+
 ## Learn window — interactive lessons the AI builds (not videos)
 
 Toggle the left panel to **◆ Learn**. Ask the tutor to teach a concept and it
