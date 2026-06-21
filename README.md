@@ -36,18 +36,12 @@ You don't strictly need a `.env` — you can paste keys into the in-app
 4. **Ask →**. With *attach board snapshot* on, the AI gets a PNG of your drawing
    and nudges you toward the next step (Socratic — not the full answer).
 
-## Models & providers
+## Models
 
-| Provider (dropdown group) | API style | Models |
-| --- | --- | --- |
-| **Claude Code** | Anthropic | Opus 4.8 · Sonnet 4.6 · Haiku 4.5 |
-| **DeepSeek** | OpenAI-compatible | DeepSeek V3 · DeepSeek R1 |
-| **OpenCode Go plan** | OpenAI-compatible | MiniMax M3 · Kimi K2.6 · GLM · Qwen |
-
-Each provider's **Base URL** is editable in Settings, so you can point the
-OpenAI-compatible groups at any gateway (OpenRouter, a self-hosted proxy, the
-real OpenCode Go endpoint, etc.). Adjust model IDs in
-[`src/lib/providers.ts`](src/lib/providers.ts) to match your gateway.
+The chat runs on **Claude Code** (Anthropic). Pick the model in the top-bar
+dropdown — **Claude Sonnet 4.6** (default) · Claude Opus 4.8 · Claude Haiku 4.5.
+The Base URL is editable in Settings. Models live in
+[`src/lib/providers.ts`](src/lib/providers.ts).
 
 ## Record & replay a lesson (▶ Replay)
 
@@ -162,14 +156,6 @@ instead of straight from the browser. That buys you three things:
 
 The proxy never persists anything — `.env` keys are read at start, UI-pasted keys
 are used for that one request and discarded.
-
-## CORS / providers
-
-The OpenAI-compatible groups (DeepSeek, OpenCode Go) have **editable Base URLs**
-in Settings, so you can point them at any gateway (OpenRouter, a self-hosted
-proxy, the real OpenCode Go endpoint). Adjust the model IDs in
-[`server/providers.js`](server/providers.js) **and**
-[`src/lib/providers.ts`](src/lib/providers.ts) to match your gateway.
 
 ## Structure
 

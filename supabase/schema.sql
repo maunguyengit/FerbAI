@@ -8,8 +8,10 @@ create table if not exists public.recordings (
   owner       uuid not null references auth.users(id) on delete cascade,
   title       text not null default 'Untitled lesson',
   duration_ms integer not null default 0,
-  events      jsonb not null default '[]'::jsonb,   -- timestamped board event log
-  snapshots   jsonb not null default '[]'::jsonb,   -- periodic full board states
+  events      jsonb not null default '[]'::jsonb,   -- timestamped scene event log
+  snapshots   jsonb not null default '[]'::jsonb,   -- periodic full scene states
+  transcript  jsonb,                                 -- word-level transcript (Deepgram), timeline-aligned
+  chapters    jsonb,                                 -- auto-generated chapters
   audio_path  text,                                  -- key into the 'recordings' storage bucket
   audio_mime  text,
   shared      boolean not null default false,        -- teacher flipped "share"

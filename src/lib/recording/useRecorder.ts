@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { RawSceneEvent, Recording, RecorderStatus, Scene, SceneEvent, Snapshot } from './types'
+import type { RawSceneEvent, Recording, RecorderStatus, Scene, SceneEvent, Snapshot, TranscriptWord } from './types'
 import { EMPTY_SCENE } from './types'
 import { DEMO_RECORDING } from './demoRecording'
+import { startLive, type LiveSession } from '../deepgram/live'
 
 const SNAPSHOT_EVERY_MS = 30_000
 let recSeq = 0
@@ -45,6 +46,11 @@ export function useRecorder(): RecorderApi {
   const snapTimerRef = useRef<number | null>(null)
   const elapsedTimerRef = useRef<number | null>(null)
 
+  // live transcription (Deepgram) during recording
+  const transcriptRef = useRef<TranscriptWord[]>([])
+  const dgSessionRef = useRef<LiveSession | null>(null)
+  const dgOffsetRef = useRef(0)
+
   const now = () => Date.now() - startTimeRef.current
 
   const recordEvent = useCallback((ev: RawSceneEvent) => {
@@ -64,6 +70,8 @@ export function useRecorder(): RecorderApi {
     eventsRef.current = []
     snapsRef.current = []
     chunksRef.current = []
+    transcriptRef.current = []
+    dgOffsetRef.current = 0
 
     // try audio — optional, so playback still works without a mic
     let audioOk = false
@@ -90,6 +98,17 @@ export function useRecorder(): RecorderApi {
       snapsRef.current.push(snapScene(now()))
     }, SNAPSHOT_EVERY_MS)
     elapsedTimerRef.current = window.setInterval(() => setElapsedMs(now()), 250)
+
+    // start live transcription on the same mic (best-effort; offset-aligned to the timeline)
+    if (audioOk && streamRef.current) {
+      startLive(streamRef.current, {
+        onOpen: () => { dgOffsetRef.current = now() },
+        onFinal: (_t, words) => {
+          const off = dgOffsetRef.current
+          for (const w of words) transcriptRef.current.push({ w: w.w, start: off + w.start, end: off + w.end })
+        },
+      }).then((s) => { dgSessionRef.current = s }).catch(() => { /* deepgram unavailable */ })
+    }
   }, [])
 
   const stop = useCallback(async (): Promise<Recording | null> => {
@@ -99,6 +118,12 @@ export function useRecorder(): RecorderApi {
     if (elapsedTimerRef.current) { clearInterval(elapsedTimerRef.current); elapsedTimerRef.current = null }
     // final snapshot
     snapsRef.current.push(snapScene(durationMs))
+
+    // stop transcription + let Deepgram flush the last finals
+    try { dgSessionRef.current?.stop() } catch { /* */ }
+    dgSessionRef.current = null
+    if (transcriptRef.current.length === 0) { /* no transcript */ } else { await new Promise((r) => setTimeout(r, 400)) }
+    const transcript = transcriptRef.current.slice().sort((a, b) => a.start - b.start)
 
     // finalize audio
     let audioUrl: string | undefined
@@ -128,6 +153,7 @@ export function useRecorder(): RecorderApi {
       durationMs,
       events: eventsRef.current,
       snapshots: snapsRef.current,
+      transcript: transcript.length ? transcript : undefined,
       audioUrl,
       audioMime,
       audioBlob,

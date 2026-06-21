@@ -4,7 +4,17 @@
 // virtual clock. Hand-authored event log + snapshots; ids are stable.
 
 import type { Element } from '../types'
-import type { Recording } from './types'
+import type { Recording, TranscriptWord } from './types'
+
+// build word-level transcript timings from [startMs, phrase] lines
+function words(lines: [number, string][]): TranscriptWord[] {
+  const out: TranscriptWord[] = []
+  const per = 250
+  for (const [start, text] of lines) {
+    text.split(/\s+/).forEach((w, i) => out.push({ w, start: start + i * per, end: start + i * per + per - 40 }))
+  }
+  return out
+}
 
 const INK = 'oklch(27% 0.008 70)'
 const CLAY = 'oklch(61% 0.115 42)'
@@ -41,5 +51,16 @@ export const DEMO_RECORDING: Recording = {
   snapshots: [
     { t: 0, elements: [] },
     { t: 6800, elements: ALL },
+  ],
+  transcript: words([
+    [200, "Let's solve x squared equals nine."],
+    [2700, 'First, take the square root of both sides.'],
+    [4600, 'Remember plus or minus.'],
+    [5400, 'So x equals plus or minus three.'],
+  ]),
+  chapters: [
+    { t: 0, title: 'Set up the equation' },
+    { t: 2700, title: 'Square-root both sides' },
+    { t: 5400, title: 'Plus-minus answer' },
   ],
 }
