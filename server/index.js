@@ -2,6 +2,13 @@ import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import { PROVIDERS, SYSTEM_PROMPT, envKeyFor } from './providers.js'
+import { formatTutorReview, messagesToTranscript, scoreTutorTranscript } from './tutorReview.js'
+import {
+  appendMemoryEvent,
+  finalizeAgent1Session,
+  getAgentMemoryPacket,
+  writeAgent2ReviewMemory,
+} from './memory.js'
 
 const app = express()
 const PORT = process.env.PORT || 8787
@@ -20,11 +27,62 @@ app.get('/api/providers', (_req, res) => {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
+app.post('/api/tutor-review', (req, res) => {
+  try {
+    const { messages = [], transcript, boardState = '', lessonGoal = '', sessionId } = req.body || {}
+    const review = scoreTutorTranscript({
+      transcript: transcript || messagesToTranscript(messages),
+      boardState,
+      lessonGoal,
+    })
+    const summary = formatTutorReview(review)
+    if (sessionId) {
+      writeAgent2ReviewMemory({ sessionId, review, summary }).catch((err) => {
+        console.warn(`[memory] Agent 2 review write failed: ${err?.message || err}`)
+      })
+    }
+    res.json({ review, summary })
+  } catch (err) {
+    res.status(400).json({ error: err?.message || 'Could not review the tutoring session.' })
+  }
+})
+
+app.post('/api/memory/session/:sessionId/end', async (req, res) => {
+  try {
+    const { sessionId } = req.params
+    const { metadata = {}, userId = 'local-user' } = req.body || {}
+    const summary = await finalizeAgent1Session({ sessionId, userId, metadata })
+    res.json({ summary })
+  } catch (err) {
+    res.status(400).json({ error: err?.message || 'Could not finalize session memory.' })
+  }
+})
+
+app.get('/api/memory/:sessionId/packet', async (req, res) => {
+  try {
+    const packet = await getAgentMemoryPacket(req.params.sessionId, req.query || {})
+    res.json(packet)
+  } catch (err) {
+    res.status(400).json({ error: err?.message || 'Could not read memory packet.' })
+  }
+})
+
+app.post('/api/memory/:sessionId/events', async (req, res) => {
+  try {
+    const event = await appendMemoryEvent(req.params.sessionId, req.body || {})
+    res.json({ event })
+  } catch (err) {
+    res.status(400).json({ error: err?.message || 'Could not append memory event.' })
+  }
+})
+
 // ---- streaming chat proxy ----
 app.post('/api/chat', async (req, res) => {
-  const { providerId, modelId, messages = [], image, clientKey, baseUrl, context, wantAct } = req.body || {}
+  const { providerId, modelId, messages = [], image, clientKey, baseUrl, context, wantAct, sessionId, userId = 'local-user' } = req.body || {}
   const provider = PROVIDERS[providerId]
   const model = provider?.models[modelId]
+  const requestSessionId = sessionId || `session_${Date.now().toString(36)}`
+  const requestId = `turn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
 
   const fail = (status, message) => {
     if (!res.headersSent) {
@@ -57,7 +115,33 @@ app.post('/api/chat', async (req, res) => {
     ? `\n\n[BUILD IT: For THIS turn you MUST include exactly one ferbai-viz block selecting the most fitting widget (prefer a built-in over custom). Keep spoken guidance short and outside the block.]`
     : `\n\n[ACT ON THE BOARD: For THIS turn you MUST include exactly one ferbai-draw block that writes your next step in the empty space (do not overlap their work). Keep spoken guidance short and outside the block.]`
   const turns = messages.map((m) => ({ ...m }))
-  const suffix = `${note}${directive}`
+  const latestUserTurn = [...turns].reverse().find((turn) => turn.role === 'user')
+  appendMemoryEvent(requestSessionId, {
+    id: `${requestId}_user`,
+    sourceAgent: 'agent1',
+    type: 'user_message_received',
+    payload: {
+      text: latestUserTurn?.text || '',
+      userId,
+      providerId,
+      modelId,
+      context,
+      wantAct: !!wantAct,
+      imageAttached: !!image,
+    },
+  }).catch((err) => console.warn(`[memory] user event write failed: ${err?.message || err}`))
+  let memoryNote = ''
+  try {
+    const packet = await getAgentMemoryPacket(requestSessionId, {
+      userId,
+      queryText: latestUserTurn?.text || '',
+      activeView: mode,
+    })
+    memoryNote = formatAgentMemoryGuidance(packet)
+  } catch (err) {
+    console.warn(`[memory] packet read failed: ${err?.message || err}`)
+  }
+  const suffix = `${memoryNote}${note}${directive}`
   if (suffix) {
     for (let i = turns.length - 1; i >= 0; i--) {
       if (turns[i].role === 'user') {
@@ -84,6 +168,12 @@ app.post('/api/chat', async (req, res) => {
   })
 
   try {
+    await appendMemoryEvent(requestSessionId, {
+      id: `${requestId}_assistant_started`,
+      sourceAgent: 'agent1',
+      type: 'assistant_response_started',
+      payload: { providerId, modelId, mode },
+    })
     const upstream =
       provider.type === 'anthropic'
         ? await callAnthropic({ base, apiKey, model: modelId, messages: turns, image, sendImage, signal: abort.signal })
@@ -91,11 +181,21 @@ app.post('/api/chat', async (req, res) => {
 
     if (!upstream.ok || !upstream.body) {
       const detail = await readError(upstream)
+      appendMemoryEvent(requestSessionId, {
+        id: `${requestId}_assistant_failed`,
+        sourceAgent: 'agent1',
+        type: 'assistant_response_failed',
+        payload: { providerId, modelId, error: `${provider.label} ${upstream.status}: ${detail}` },
+      }).catch((err) => console.warn(`[memory] failure event write failed: ${err?.message || err}`))
       res.write(`data: ${JSON.stringify({ error: `${provider.label} ${upstream.status}: ${detail}` })}\n\n`)
       return res.end()
     }
 
-    const emit = (text) => res.write(`data: ${JSON.stringify({ t: text })}\n\n`)
+    let assistantText = ''
+    const emit = (text) => {
+      assistantText += text
+      res.write(`data: ${JSON.stringify({ t: text })}\n\n`)
+    }
     await pumpSSE(upstream.body, (data) => {
       if (data === '[DONE]') return
       try {
@@ -111,11 +211,23 @@ app.post('/api/chat', async (req, res) => {
         /* keep-alive / partial json */
       }
     })
+    await appendMemoryEvent(requestSessionId, {
+      id: `${requestId}_assistant_completed`,
+      sourceAgent: 'agent1',
+      type: 'assistant_response_completed',
+      payload: { providerId, modelId, text: assistantText, mode },
+    })
 
     res.write('data: [DONE]\n\n')
     res.end()
   } catch (err) {
     if (abort.signal.aborted) return res.end()
+    appendMemoryEvent(requestSessionId, {
+      id: `${requestId}_assistant_failed`,
+      sourceAgent: 'agent1',
+      type: 'assistant_response_failed',
+      payload: { providerId, modelId, error: err?.message || 'proxy error' },
+    }).catch((writeErr) => console.warn(`[memory] failure event write failed: ${writeErr?.message || writeErr}`))
     res.write(`data: ${JSON.stringify({ error: err?.message || 'proxy error' })}\n\n`)
     res.end()
   }
@@ -170,6 +282,32 @@ function vizNote(viz) {
     `Available widgets:\n${catalog}\n` +
     `Pick the best-fitting widget, fill in its data, and write a short intro. Keep your spoken guidance OUTSIDE the block.]`
   )
+}
+
+function formatAgentMemoryGuidance(packet) {
+  const notes = []
+  const guidance = Array.isArray(packet?.agent2Guidance) ? packet.agent2Guidance : []
+  const similar = Array.isArray(packet?.similarSummaries) ? packet.similarSummaries : []
+
+  if (guidance.length) {
+    const lines = guidance
+      .slice(-5)
+      .map((item) => `- ${item.type || 'note'} (${item.verdict || 'review'}, confidence ${item.confidence ?? 'n/a'}): ${String(item.text || '').slice(0, 220)}`)
+    notes.push(`Agent 2 coaching notes are advisory, not hard rules:\n${lines.join('\n')}`)
+  }
+
+  if (similar.length) {
+    const lines = similar
+      .slice(0, 3)
+      .map((item) => {
+        const topics = item.topics?.length ? ` topics=${item.topics.slice(0, 5).join(', ')}` : ''
+        return `- score ${item.score}:${topics} ${String(item.rolling || '').slice(0, 240)}`
+      })
+    notes.push(`Similar prior session summaries for this user:\n${lines.join('\n')}`)
+  }
+
+  if (!notes.length) return ''
+  return `\n\n[MEMORY CONTEXT FOR AGENT 1:\n${notes.join('\n\n')}\nUse this to adapt your tutoring style and avoid repeated mistakes. Do not mention this memory block unless the user asks.]`
 }
 
 // ---------------------------------------------------------------- upstream calls

@@ -39,6 +39,20 @@
 }
 .chat__clear:hover:not(:disabled) { background: var(--color-paper-3); color: var(--color-accent); }
 .chat__clear:disabled { opacity: 0.4; cursor: not-allowed; }
+.chat__review {
+  background: var(--color-paper-2);
+  border: var(--rule) solid var(--color-ink);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-soft);
+  color: var(--color-ink);
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  padding: var(--space-2xs) var(--space-xs);
+}
+.chat__review:hover:not(:disabled) { color: var(--color-accent); transform: translate(1px, 1px); box-shadow: none; }
+.chat__review:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .chat__warn {
   padding: var(--space-xs) var(--space-lg);

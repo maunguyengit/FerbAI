@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "redis-semantic-cache": {
+      "source": "redis/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/redis-semantic-cache/SKILL.md",
+      "computedHash": "4bc765d72422ef9e0740b95cdfae3966bec09c9aaa5af70836eb1592feae5a78"
+    },
+    "redis-vector-search": {
+      "source": "redis/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/redis-vector-search/SKILL.md",
+      "computedHash": "cf3d5d504fad0019b8fac8de2d39a2ff8a0b9545a9f22bb8b58ecc2271ce8748"
+    }
+  }
+}

@@ -142,6 +142,34 @@ instead of straight from the browser. That buys you three things:
 The proxy never persists anything — `.env` keys are read at start, UI-pasted keys
 are used for that one request and discarded.
 
+## Semantic memory embeddings
+
+FerbAI can recall similar past tutoring sessions by storing session-summary
+embeddings in Redis Stack vector indexes. The default local setup uses RedisVL
+with Hugging Face Sentence Transformers, so there are no embedding API costs:
+
+```bash
+pip install -r requirements.txt
+```
+
+Set these in `.env`:
+
+```bash
+MEMORY_EMBEDDINGS_BACKEND=redisvl-hf
+MEMORY_HF_MODEL=sentence-transformers/all-MiniLM-L6-v2
+MEMORY_EMBEDDING_TIMEOUT_MS=120000
+PYTHON_BIN=python
+```
+
+The first embedding call downloads the model to your machine and can be slow on
+CPU. After that, session finalization and memory lookup run embeddings locally
+and store 384-dim `FLOAT32` cosine vectors in Redis, e.g.
+`ferbai_summary_vector_idx_384`.
+
+If local embeddings fail, FerbAI still saves normal session events and summaries.
+You can optionally configure `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY`, and
+`EMBEDDINGS_MODEL` as an OpenAI-compatible fallback.
+
 ## CORS / providers
 
 The OpenAI-compatible groups (DeepSeek, OpenCode Go) have **editable Base URLs**

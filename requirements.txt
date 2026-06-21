@@ -1,0 +1,2 @@
+redisvl[sentence-transformers]
+sentence-transformers

@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { AIError, fetchProviderStatus, streamChat, type ProviderStatus } from '../lib/ai'
+import {
+  AIError,
+  appendMemoryEvent,
+  fetchProviderStatus,
+  finalizeMemorySession,
+  reviewTutorSession,
+  streamChat,
+  type ProviderStatus,
+} from '../lib/ai'
 import { decodeSelection, getModel, getProvider } from '../lib/providers'
 import { getApiKey } from '../lib/storage'
 import { parseReply } from '../lib/drawblock'
@@ -20,6 +28,24 @@ interface Props {
 
 let msgSeq = 0
 const mid = () => `m_${Date.now().toString(36)}_${msgSeq++}`
+const SESSION_KEY = 'ferbai.sessionId'
+const USER_KEY = 'ferbai.userId'
+const newSessionId = () => `session_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+const newUserId = () => `user_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+const getSessionId = () => {
+  const existing = localStorage.getItem(SESSION_KEY)
+  if (existing) return existing
+  const created = newSessionId()
+  localStorage.setItem(SESSION_KEY, created)
+  return created
+}
+const getUserId = () => {
+  const existing = localStorage.getItem(USER_KEY)
+  if (existing) return existing
+  const created = newUserId()
+  localStorage.setItem(USER_KEY, created)
+  return created
+}
 
 export default function ChatPanel({
   selection, view, getActiveImage, activeEmpty, getContext, applyDraw, applyGraph, applyViz, keysVersion,
@@ -29,6 +55,8 @@ export default function ChatPanel({
   const [includeBoard, setIncludeBoard] = useState(true)
   const [aiActs, setAiActs] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [sessionId, setSessionId] = useState(getSessionId)
+  const [userId] = useState(getUserId)
   const [status, setStatus] = useState<ProviderStatus>({})
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -61,6 +89,76 @@ export default function ChatPanel({
   const clearChat = () => {
     if (busy) return
     setMessages([])
+  }
+
+  const endSession = async () => {
+    if (busy || messages.length === 0) return
+    setBusy(true)
+    const controller = new AbortController()
+    abortRef.current = controller
+    const summaryMsg: ChatMessage = { id: mid(), role: 'assistant', text: '', pending: true }
+    setMessages((m) => [...m, summaryMsg])
+    try {
+      const { summary } = await finalizeMemorySession({
+        sessionId,
+        userId,
+        context: getContext(),
+        signal: controller.signal,
+      })
+      const nextSessionId = newSessionId()
+      localStorage.setItem(SESSION_KEY, nextSessionId)
+      setSessionId(nextSessionId)
+      setMessages((m) =>
+        m.map((x) =>
+          x.id === summaryMsg.id
+            ? {
+                ...x,
+                pending: false,
+                text:
+                  `Session memory saved.\n\n${summary.rolling}` +
+                  (summary.nextRecommendedStep ? `\n\nNext: ${summary.nextRecommendedStep}` : ''),
+              }
+            : x,
+        ),
+      )
+    } catch (err) {
+      const message = err instanceof AIError ? err.message
+        : err instanceof DOMException && err.name === 'AbortError' ? 'stopped.'
+        : err instanceof Error ? err.message : 'Could not end this session.'
+      setMessages((m) => m.map((x) => (x.id === summaryMsg.id ? { ...x, pending: false, error: true, text: message } : x)))
+    } finally {
+      setBusy(false)
+      abortRef.current = null
+    }
+  }
+
+  const reviewTutor = async () => {
+    if (busy || messages.length === 0) return
+    setBusy(true)
+    const controller = new AbortController()
+    abortRef.current = controller
+    const reviewMsg: ChatMessage = { id: mid(), role: 'assistant', text: '', pending: true }
+    setMessages((m) => [...m, reviewMsg])
+    try {
+      const { summary } = await reviewTutorSession({
+        sessionId,
+        userId,
+        history: messages,
+        context: getContext(),
+        signal: controller.signal,
+      })
+      setMessages((m) => m.map((x) => (x.id === reviewMsg.id ? { ...x, text: summary, pending: false } : x)))
+    } catch (err) {
+      const message = err instanceof AIError ? err.message
+        : err instanceof DOMException && err.name === 'AbortError' ? 'stopped.'
+        : err instanceof Error ? err.message : 'Could not review this session.'
+      setMessages((m) =>
+        m.map((x) => (x.id === reviewMsg.id ? { ...x, pending: false, error: message !== 'stopped.', text: message } : x)),
+      )
+    } finally {
+      setBusy(false)
+      abortRef.current = null
+    }
   }
 
   const send = async () => {
@@ -98,6 +196,8 @@ export default function ChatPanel({
     let full = ''
     try {
       await streamChat({
+        sessionId,
+        userId,
         providerId,
         modelId,
         history,
@@ -118,6 +218,13 @@ export default function ChatPanel({
       if (actions && actions.length) drew = applyDraw(actions)
       if (graph && graph.length) graphed = applyGraph(graph)
       if (viz) built = applyViz(viz) ?? undefined
+      if (drew || graphed || built) {
+        appendMemoryEvent({
+          sessionId,
+          type: 'tool_result',
+          payload: { drew, graphed, built, view },
+        })
+      }
       const fallback = drew ? '✎ Added that to your board.' : graphed ? '∿ Plotted that on the graph.' : built ? `◆ Built an interactive: ${built}.` : ''
       setMessages((m) =>
         m.map((x) => (x.id === assistantMsg.id ? { ...x, text: clean || fallback, drew, graphed, built, pending: false } : x)),
@@ -158,6 +265,12 @@ export default function ChatPanel({
         </span>
         <button className="chat__clear" onClick={clearChat} disabled={busy || messages.length === 0}>
           Clear AI
+        </button>
+        <button className="chat__review" onClick={reviewTutor} disabled={busy || messages.length === 0}>
+          Review
+        </button>
+        <button className="chat__review" onClick={endSession} disabled={busy || messages.length === 0}>
+          End Session
         </button>
       </header>
 
