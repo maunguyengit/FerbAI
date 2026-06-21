@@ -38,7 +38,8 @@
 }
 .rec:hover { background: var(--color-paper-3); }
 .rec--on { border-color: var(--color-ink); background: var(--color-paper-3); }
-.rec__name { font-weight: 600; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rec__name { font-weight: 600; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
+.rec__tag { font-family: var(--font-mono); font-size: 0.55rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; background: var(--color-sage); color: var(--color-ink); border: 1.5px solid var(--color-ink); border-radius: var(--radius-sm); padding: 0 5px; }
 .rec__meta { text-transform: none; letter-spacing: 0; }
 .rec__del { border: none; background: none; cursor: pointer; color: var(--color-ink-soft); font-size: var(--text-lg); padding: 0 4px; }
 .rec__del:hover { color: var(--color-red); }

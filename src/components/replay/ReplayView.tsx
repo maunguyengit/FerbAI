@@ -136,10 +136,10 @@ export default function ReplayView({ recordings, onDelete }: Props) {
             {recordings.map((r) => (
               <li key={r.id}>
                 <button className={`rec ${r.id === selId ? 'rec--on' : ''}`} onClick={() => setSelId(r.id)}>
-                  <span className="rec__name">{r.title}</span>
+                  <span className="rec__name">{r.title}{r.demo && <span className="rec__tag">demo</span>}</span>
                   <span className="rec__meta caption">{fmt(r.durationMs)} · {r.audioUrl ? '🎙' : 'silent'} · {r.events.length} ev</span>
                 </button>
-                <button className="rec__del" onClick={() => onDelete(r.id)} title="Delete" aria-label="delete">×</button>
+                {!r.demo && <button className="rec__del" onClick={() => onDelete(r.id)} title="Delete" aria-label="delete">×</button>}
               </li>
             ))}
           </ul>

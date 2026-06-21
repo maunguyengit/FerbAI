@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Element } from '../types'
 import type { BoardEvent, RawBoardEvent, Recording, RecorderStatus, Snapshot } from './types'
+import { DEMO_RECORDING } from './demoRecording'
 
 const SNAPSHOT_EVERY_MS = 30_000
 let recSeq = 0
@@ -26,7 +27,8 @@ export interface RecorderApi {
 
 export function useRecorder(): RecorderApi {
   const [status, setStatus] = useState<RecorderStatus>('idle')
-  const [recordings, setRecordings] = useState<Recording[]>([])
+  // the bundled demo is always present so there's a recording to replay on open
+  const [recordings, setRecordings] = useState<Recording[]>([DEMO_RECORDING])
   const [elapsedMs, setElapsedMs] = useState(0)
   const [hasAudio, setHasAudio] = useState(false)
   const [error, setError] = useState<string | null>(null)

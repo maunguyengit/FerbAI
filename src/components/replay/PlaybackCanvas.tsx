@@ -22,8 +22,8 @@ export default function PlaybackCanvas({ elements, bounds }: Props) {
   const recomputeCamera = () => {
     const { w, h } = sizeRef.current
     if (!bounds || bounds.w <= 0 || bounds.h <= 0) { camRef.current = { s: 1, px: w / 2, py: h / 2 }; return }
-    const pad = 60
-    const s = Math.max(0.05, Math.min(2.2, Math.min((w - 2 * pad) / bounds.w, (h - 2 * pad) / bounds.h)))
+    const pad = 36
+    const s = Math.max(0.05, Math.min(3, Math.min((w - 2 * pad) / bounds.w, (h - 2 * pad) / bounds.h)))
     camRef.current = {
       s,
       px: (w - bounds.w * s) / 2 - bounds.x * s,

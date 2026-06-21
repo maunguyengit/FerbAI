@@ -33,6 +33,8 @@ export interface Recording {
   audioUrl?: string
   /** mime of the audio blob */
   audioMime?: string
+  /** true for the bundled demo/test fixture */
+  demo?: boolean
 }
 
 export type RecorderStatus = 'idle' | 'recording'
