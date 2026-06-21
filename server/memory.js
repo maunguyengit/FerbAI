@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createClient } from 'redis'
@@ -14,6 +15,8 @@ const SIMILARITY_THRESHOLD = Number(process.env.MEMORY_SIMILARITY_THRESHOLD || 0
 const SIMILARITY_LIMIT = Number(process.env.MEMORY_SIMILARITY_LIMIT || 3)
 const VECTOR_BACKEND = process.env.MEMORY_VECTOR_BACKEND || 'redis-stack'
 const DEFAULT_HF_EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
+const EMBEDDING_CACHE_TTL_SECONDS = Number(process.env.MEMORY_EMBEDDING_CACHE_TTL_SECONDS || 60 * 60 * 24 * 7)
+const EMBEDDING_MEMORY_CACHE_LIMIT = Number(process.env.MEMORY_EMBEDDING_MEMORY_CACHE_LIMIT || 500)
 
 const fallback = {
   events: new Map(),
@@ -26,6 +29,13 @@ let redisClient = null
 let redisReady = false
 let redisConnectPromise = null
 const ensuredVectorIndexes = new Set()
+const embeddingMemoryCache = new Map()
+let embeddingWorker = null
+let embeddingWorkerReady = false
+let embeddingWorkerBuffer = ''
+let embeddingWorkerRequestSeq = 0
+let embeddingWorkerStartPromise = null
+const embeddingWorkerPending = new Map()
 
 function nowIso() {
   return new Date().toISOString()
@@ -47,6 +57,17 @@ function userMemoryKey(userId, kind) {
   return `ferbai:memory:user:${userId || 'local-user'}:${kind}`
 }
 
+function embeddingCacheKey({ backend, model, text }) {
+  const hash = createHash('sha256')
+    .update(String(backend || 'unknown'))
+    .update('\n')
+    .update(String(model || 'unknown'))
+    .update('\n')
+    .update(String(text || ''))
+    .digest('hex')
+  return `ferbai:memory:embedding_cache:${hash}`
+}
+
 function vectorIndexName(dim) {
   return `ferbai_summary_vector_idx_${dim}`
 }
@@ -65,6 +86,53 @@ function safeJson(value, fallbackValue = null) {
     return JSON.parse(value)
   } catch {
     return fallbackValue
+  }
+}
+
+function rememberEmbeddingInProcess(key, embedding) {
+  if (!Array.isArray(embedding) || !embedding.length) return
+  if (embeddingMemoryCache.has(key)) embeddingMemoryCache.delete(key)
+  embeddingMemoryCache.set(key, embedding)
+  while (embeddingMemoryCache.size > EMBEDDING_MEMORY_CACHE_LIMIT) {
+    const oldest = embeddingMemoryCache.keys().next().value
+    embeddingMemoryCache.delete(oldest)
+  }
+}
+
+async function readCachedEmbedding(key) {
+  const memoryHit = embeddingMemoryCache.get(key)
+  if (memoryHit) return memoryHit
+
+  const redis = await getRedis()
+  if (!redis) return null
+  try {
+    const cached = safeJson(await redis.get(key))
+    const embedding = cached?.embedding
+    if (Array.isArray(embedding) && embedding.length) {
+      rememberEmbeddingInProcess(key, embedding)
+      return embedding
+    }
+  } catch (err) {
+    console.warn(`[memory] embedding cache read failed: ${err?.message || err}`)
+  }
+  return null
+}
+
+async function writeCachedEmbedding(key, embedding, metadata = {}) {
+  if (!Array.isArray(embedding) || !embedding.length) return
+  rememberEmbeddingInProcess(key, embedding)
+
+  const redis = await getRedis()
+  if (!redis) return
+  try {
+    await redis.set(key, JSON.stringify({
+      ...metadata,
+      embedding,
+      dims: embedding.length,
+      createdAt: nowIso(),
+    }), { EX: EMBEDDING_CACHE_TTL_SECONDS })
+  } catch (err) {
+    console.warn(`[memory] embedding cache write failed: ${err?.message || err}`)
   }
 }
 
@@ -312,13 +380,33 @@ function embeddingConfig() {
 async function embedText(text) {
   const backend = (process.env.MEMORY_EMBEDDINGS_BACKEND || 'openai').toLowerCase()
   if (backend === 'none' || backend === 'off' || backend === 'disabled') return null
+  const normalizedText = text.slice(0, 8000)
   if (backend === 'redisvl-hf' || backend === 'hf' || backend === 'sentence-transformers') {
-    const embedding = await embedTextWithRedisVl(text)
-    if (embedding) return embedding
+    const model = process.env.MEMORY_HF_MODEL || DEFAULT_HF_EMBEDDING_MODEL
+    const cacheKey = embeddingCacheKey({ backend: 'redisvl-hf', model, text: normalizedText })
+    const cached = await readCachedEmbedding(cacheKey)
+    if (cached) return cached
+
+    const embedding = await embedTextWithRedisVl(normalizedText, model)
+    if (embedding) {
+      await writeCachedEmbedding(cacheKey, embedding, { backend: 'redisvl-hf', model })
+      return embedding
+    }
     if (!embeddingConfig().configured) return null
     console.warn('[memory] falling back to OpenAI-compatible embeddings after local RedisVL embedding failed.')
   }
-  return embedTextWithOpenAiCompatible(text)
+
+  const config = embeddingConfig()
+  const cacheKey = embeddingCacheKey({ backend: 'openai-compatible', model: config.model, text: normalizedText })
+  const cached = await readCachedEmbedding(cacheKey)
+  if (cached) return cached
+
+  const embedding = await embedTextWithOpenAiCompatible(normalizedText)
+  if (embedding) {
+    await writeCachedEmbedding(cacheKey, embedding, { backend: 'openai-compatible', model: config.model })
+    if (embedding) return embedding
+  }
+  return embedding
 }
 
 async function embedTextWithOpenAiCompatible(text) {
@@ -331,7 +419,7 @@ async function embedTextWithOpenAiCompatible(text) {
         'content-type': 'application/json',
         authorization: `Bearer ${config.apiKey}`,
       },
-      body: JSON.stringify({ model: config.model, input: text.slice(0, 8000) }),
+      body: JSON.stringify({ model: config.model, input: text }),
     })
     if (!res.ok) {
       const detail = await res.text().catch(() => '')
@@ -347,11 +435,11 @@ async function embedTextWithOpenAiCompatible(text) {
   }
 }
 
-async function embedTextWithRedisVl(text) {
+async function embedTextWithRedisVl(text, model = process.env.MEMORY_HF_MODEL || DEFAULT_HF_EMBEDDING_MODEL) {
   try {
     const result = await runEmbeddingHelper({
-      text: text.slice(0, 8000),
-      model: process.env.MEMORY_HF_MODEL || DEFAULT_HF_EMBEDDING_MODEL,
+      text,
+      model,
     })
     const embedding = result?.embedding
     return Array.isArray(embedding) && embedding.length ? embedding : null
@@ -362,52 +450,144 @@ async function embedTextWithRedisVl(text) {
 }
 
 function runEmbeddingHelper(payload) {
-  const script = join(__dirname, 'redisvl_embed.py')
+  const worker = getEmbeddingWorker()
   return new Promise((resolve, reject) => {
     const timeoutMs = Number(process.env.MEMORY_EMBEDDING_TIMEOUT_MS || 120000)
+    const id = `embed_${++embeddingWorkerRequestSeq}`
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      embeddingWorkerPending.delete(id)
+      restartEmbeddingWorker()
+      reject(new Error(`embedding worker timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+
+    embeddingWorkerPending.set(id, {
+      resolve: (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        resolve(value)
+      },
+      reject: (err) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        reject(err)
+      },
+    })
+
+    worker
+      .then((child) => {
+        if (settled) return
+        child.stdin.write(`${JSON.stringify({ ...payload, id })}\n`)
+      })
+      .catch((err) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        embeddingWorkerPending.delete(id)
+        reject(err)
+      })
+  })
+}
+
+function getEmbeddingWorker() {
+  if (embeddingWorker && embeddingWorkerReady && !embeddingWorker.killed) return Promise.resolve(embeddingWorker)
+  if (embeddingWorkerStartPromise) return embeddingWorkerStartPromise
+
+  const script = join(__dirname, 'embedding_worker.py')
+  embeddingWorkerStartPromise = new Promise((resolve, reject) => {
     const child = spawn(process.env.PYTHON_BIN || 'python', [script], {
       cwd: join(__dirname, '..'),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
-    let stdout = ''
     let stderr = ''
-    let settled = false
-    const timeout = setTimeout(() => {
-      if (settled) return
-      settled = true
+    const startTimeoutMs = Number(process.env.MEMORY_EMBEDDING_WORKER_START_TIMEOUT_MS || process.env.MEMORY_EMBEDDING_TIMEOUT_MS || 120000)
+    const startTimeout = setTimeout(() => {
       child.kill()
-      reject(new Error(`embedding helper timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
+      reject(new Error(`embedding worker start timed out after ${startTimeoutMs}ms`))
+    }, startTimeoutMs)
+
+    embeddingWorker = child
+    embeddingWorkerReady = false
+    embeddingWorkerBuffer = ''
 
     child.stdout.on('data', (chunk) => {
-      stdout += chunk
+      embeddingWorkerBuffer += chunk.toString('utf8')
+      const lines = embeddingWorkerBuffer.split(/\r?\n/)
+      embeddingWorkerBuffer = lines.pop() || ''
+      for (const line of lines) handleEmbeddingWorkerLine(line, { child, resolve, reject, startTimeout })
     })
     child.stderr.on('data', (chunk) => {
-      stderr += chunk
+      stderr += chunk.toString('utf8')
+      if (stderr.length > 4000) stderr = stderr.slice(-4000)
     })
     child.on('error', (err) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
+      clearTimeout(startTimeout)
+      resetEmbeddingWorkerState()
       reject(err)
     })
     child.on('close', (code) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
-      if (code !== 0) {
-        reject(new Error((stderr || stdout || `embedding helper exited with code ${code}`).slice(0, 1000)))
-        return
-      }
-      try {
-        resolve(JSON.parse(stdout))
-      } catch (err) {
-        reject(new Error(`embedding helper returned invalid JSON: ${err?.message || err}`))
-      }
+      clearTimeout(startTimeout)
+      const message = stderr || `embedding worker exited with code ${code}`
+      if (!embeddingWorkerReady) reject(new Error(message.slice(0, 1000)))
+      for (const pending of embeddingWorkerPending.values()) pending.reject(new Error(message.slice(0, 1000)))
+      embeddingWorkerPending.clear()
+      resetEmbeddingWorkerState()
     })
-    child.stdin.end(JSON.stringify(payload))
   })
+
+  return embeddingWorkerStartPromise
+}
+
+function handleEmbeddingWorkerLine(line, { child, resolve, startTimeout }) {
+  if (!line.trim()) return
+  let message
+  try {
+    message = JSON.parse(line)
+  } catch (err) {
+    console.warn(`[memory] embedding worker returned invalid JSON: ${line.slice(0, 300)}`)
+    return
+  }
+
+  if (message.type === 'ready') {
+    embeddingWorkerReady = true
+    clearTimeout(startTimeout)
+    const start = embeddingWorkerStartPromise
+    embeddingWorkerStartPromise = null
+    resolve(child)
+    return start
+  }
+
+  const pending = embeddingWorkerPending.get(message.id)
+  if (!pending) return
+  embeddingWorkerPending.delete(message.id)
+  if (message.error) {
+    pending.reject(new Error(`${message.error}${message.trace ? `\n${message.trace}` : ''}`.slice(0, 1000)))
+    return
+  }
+  pending.resolve(message)
+}
+
+function restartEmbeddingWorker() {
+  if (embeddingWorker && !embeddingWorker.killed) {
+    try {
+      embeddingWorker.kill()
+    } catch {
+      /* worker may already be gone */
+    }
+  }
+  resetEmbeddingWorkerState()
+}
+
+function resetEmbeddingWorkerState() {
+  embeddingWorker = null
+  embeddingWorkerReady = false
+  embeddingWorkerBuffer = ''
+  embeddingWorkerStartPromise = null
 }
 
 export function cosineSimilarity(a, b) {

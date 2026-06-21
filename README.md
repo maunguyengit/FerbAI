@@ -177,8 +177,11 @@ PYTHON_BIN=python
 ```
 
 The first embedding call downloads the model to your machine and can be slow on
-CPU. After that, session finalization and memory lookup run embeddings locally
-and store 384-dim `FLOAT32` cosine vectors in Redis, e.g.
+CPU. After that, the backend keeps a warm Python embedding worker alive so
+session finalization and memory lookup reuse the loaded model instead of
+spawning Python for every request. Embeddings are cached by text hash in-process
+and, when Redis is configured, under a TTL-backed Redis key before being stored
+as 384-dim `FLOAT32` cosine vectors in Redis Stack, e.g.
 `ferbai_summary_vector_idx_384`.
 
 If local embeddings fail, FerbAI still saves normal session events and summaries.
