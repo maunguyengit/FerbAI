@@ -8,6 +8,14 @@ const UNDERSTANDING_RE =
 const SCAFFOLD_RE = /\b(hint|step|first|next|because|notice|let's break|simpler|example|compare|diagram|draw|board)\b/gi
 const ASSESSMENT_RE = /\b(question|quiz|practice|solve|try this|what is|why is|how would|can you|tell me)\b/gi
 const BOARD_RE = /\b(board|diagram|draw|shown|sketch|equation|graph)\b/gi
+const WEAK_DIMENSION_RECOMMENDATIONS = {
+  'student engagement': 'Invite the student to do more of the reasoning before giving the next step.',
+  'diagnosis of understanding': 'Ask the student to explain their reasoning so misconceptions surface earlier.',
+  'scaffolding and pedagogy': 'Break the task into smaller steps and ask the student to complete each step.',
+  'board grounding': 'Ground feedback in the board: point to the drawing, equation, graph, or diagram state.',
+  'supportive tone': "Add specific encouragement tied to the student's reasoning, not generic praise.",
+  'lesson-goal alignment': 'State or restate the learning goal and tie the next prompt directly to it.',
+}
 
 function countMatches(text, pattern) {
   return (text.match(pattern) || []).length
@@ -110,7 +118,11 @@ function scoreTutorTranscriptInner({ normalized, boardState = '', lessonGoal = '
   ]
 
   const averageScore = Math.round((dimensions.reduce((sum, item) => sum + item.score, 0) / dimensions.length) * 100) / 100
-  const verdict = averageScore >= 4 ? 'effective' : averageScore >= 3 ? 'needs_improvement' : 'ineffective'
+  const weakDimensions = dimensions.filter((item) => item.score <= 2)
+  const adequateDimensions = dimensions.filter((item) => item.score === 3)
+  const verdict = weakDimensions.length
+    ? averageScore >= 4 ? 'effective_with_risks' : averageScore >= 3 ? 'needs_improvement' : 'ineffective'
+    : averageScore >= 4 ? 'effective' : averageScore >= 3 ? 'needs_improvement' : 'ineffective'
   const strengths = []
   const risks = []
   const recommendations = []
@@ -140,13 +152,27 @@ function scoreTutorTranscriptInner({ normalized, boardState = '', lessonGoal = '
     recommendations.push("Add specific encouragement tied to the student's reasoning, not generic praise.")
   }
 
+  for (const item of weakDimensions) {
+    risks.push(`${item.name} is weak (${item.score}/5): ${item.rationale}`)
+    const recommendation = WEAK_DIMENSION_RECOMMENDATIONS[item.name]
+    if (recommendation) recommendations.push(recommendation)
+  }
+
+  if (!risks.length && adequateDimensions.length) {
+    risks.push(`Watch the adequate dimensions: ${adequateDimensions.map((item) => item.name).join(', ')}.`)
+    recommendations.push('Collect richer evidence before treating this tutoring pattern as consistently effective.')
+  }
+
+  const uniqueRisks = [...new Set(risks)]
+  const uniqueRecommendations = [...new Set(recommendations)]
+
   const review = {
     verdict,
     averageScore,
     dimensions,
     strengths,
-    risks,
-    recommendations,
+    risks: uniqueRisks,
+    recommendations: uniqueRecommendations,
     evidence: {
       wordCount,
       turnCounts: turns,

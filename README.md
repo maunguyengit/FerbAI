@@ -171,16 +171,21 @@ FerbAI now keeps a lightweight two-agent tutoring loop:
    evaluator ([`server/tutorReview.js`](server/tutorReview.js)) over the transcript,
    board state, and lesson goal. It scores engagement, diagnosis, scaffolding,
    board grounding, tone, and goal alignment, then writes its risks and
-   recommendations back into memory as Agent 2 review summaries. **End Session**
-   also triggers Agent 2 automatically when the session contains at least one
-   substantive student question or learning request; greetings like "hi" are
-   skipped so empty sessions do not produce noisy reviews.
+   recommendations back into memory as Agent 2 review summaries. Weak rubric
+   dimensions are always surfaced as risks, even when the average score is high.
+   **End Session** also triggers Agent 2 on the backend when the session contains
+   any substantive student turn; greetings and closings like "hi" or "thanks"
+   are skipped so empty sessions do not produce noisy reviews. The backend awaits
+   the Agent 2 memory write before finalizing the session.
 
 Before each Agent 1 response, the backend builds a memory packet for the current
 session ([`getAgentMemoryPacket`](server/memory.js)): recent events, the current
 session summary, Agent 2 guidance, and semantically similar prior sessions for
-that same user. Agent 2 notes are injected as advisory coaching context so the
-tutor can adapt without exposing the memory block to the student.
+that same user. Agent 2 risks and recommendations are injected into the latest
+Agent 1 prompt as advisory coaching context, so the tutor can adapt without
+exposing the memory block to the student. Live chat has a small semantic-memory
+time budget; if embeddings/vector search are cold, Agent 1 falls back to fast
+session memory instead of waiting on the spinner.
 
 ### Agent 2 MCP
 
@@ -222,6 +227,9 @@ exporter is disabled and keeps running normally.
 
 Current span model:
 
+- `agent1.chat` — LLM span around the main `/api/chat` tutor response, with
+  capped `input.value`, `output.value`, provider/model, session/user/request IDs,
+  active view, board/image metadata, memory context status, and HTTP status.
 - `agent1.ask_recording` — LLM span around the Anthropic paused-recording Q&A
   call in `/api/ask`, with capped `input.value`, `output.value`, model name,
   session/recording IDs, and board metadata.
@@ -232,10 +240,21 @@ Current span model:
   grounding metadata.
 - `tutoring_session` — CHAIN span when a session is ended through
   `/api/memory/session/:sessionId/end`, with session ID, recording ID, lesson
-  goal, and memory summary output.
+  goal, Agent 2 auto-review status, and memory summary output. When Agent 2 is
+  triggered by session end, `agent2.tutor_review` is a child span of
+  `tutoring_session`.
 
 Look for traces under the `ARIZE_PROJECT_NAME` project, defaulting to
 `ferbai-tutor`.
+
+You can check the no-secret tracing configuration at `/api/tracing/status`.
+The backend flushes the OpenTelemetry provider on `SIGINT`/`SIGTERM` so recent
+batch-processed spans are not dropped during local shutdown.
+
+In local dev, closing the browser tab schedules `/api/dev/shutdown` with a short
+delay; a refresh cancels it on the next page load. The shutdown endpoint is
+local-only, disabled when `NODE_ENV=production`, and can be disabled in dev with
+`DEV_SHUTDOWN_ON_CLOSE=false` or `VITE_DEV_SHUTDOWN_ON_CLOSE=false`.
 
 ## Redis memory, vector search, and embedding cache
 
@@ -258,6 +277,8 @@ MEMORY_EMBEDDING_TIMEOUT_MS=120000
 MEMORY_EMBEDDING_WORKER_START_TIMEOUT_MS=120000
 MEMORY_EMBEDDING_CACHE_TTL_SECONDS=604800
 MEMORY_EMBEDDING_MEMORY_CACHE_LIMIT=500
+MEMORY_WARM_EMBEDDINGS_ON_START=true
+CHAT_MEMORY_PACKET_TIMEOUT_MS=1200
 PYTHON_BIN=python
 ```
 
@@ -280,6 +301,12 @@ Redis keys are scoped by session and user:
   filtered by `userId` before vector KNN search.
 - `ferbai:memory:embedding_cache:<sha256>` — cached embeddings keyed by backend,
   model, and normalized text.
+
+Generated tool blocks are scrubbed before memory summaries are created. That
+keeps `ferbai-draw`, `ferbai-graph`, `ferbai-viz`, raw `ferbai-html`, `<script>`
+fragments, and generated DOM code out of "Recent focus" and semantic summary
+embeddings. Closing turns like "I'm good thank you" are not used as the next
+recommended step.
 
 If local embeddings fail, FerbAI still saves normal session events and summaries.
 You can optionally configure `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY`, and
@@ -307,6 +334,14 @@ HF worker enabled:
 - Session finalization wrote Redis Stack vector docs.
 - A later session packet retrieved a prior semantically similar session through
   user-filtered vector search.
+- Session end auto-triggered Agent 2 for substantive sessions, wrote Agent 2
+  guidance to memory, and exported both `tutoring_session` and
+  `agent2.tutor_review` spans to Arize in the same trace.
+- A prompt-capture test verified Agent 2 actually affects Agent 1: the next
+  Agent 1 model request included both Agent 2 risks and recommendations in the
+  injected memory context.
+- A chat speed check verified that cold semantic memory lookup falls back to fast
+  session memory instead of blocking the first streamed tutor response.
 - A multi-user sequence `user1 -> user2 -> user1 -> user3 -> user2` retrieved
   only each user's own prior session:
   - user1's second query matched user1's first session.
@@ -349,3 +384,4 @@ src/
 tokens.css                 portable Hallmark Brutal design tokens
 .env.example               backend keys template → copy to .env
 ```
+

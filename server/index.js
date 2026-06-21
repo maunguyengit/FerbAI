@@ -1,6 +1,7 @@
 import './instrumentation.mjs'
 import express from 'express'
 import cors from 'cors'
+import { createServer } from 'node:http'
 import { PROVIDERS, SYSTEM_PROMPT, ASK_SYSTEM_PROMPT, envKeyFor } from './providers.js'
 import { WebSocketServer } from 'ws'
 import { LiveTranscriptionEvents } from '@deepgram/sdk'
@@ -11,15 +12,28 @@ import {
   appendMemoryEvent,
   finalizeAgent1Session,
   getAgentMemoryPacket,
+  getSessionReviewContext,
+  warmEmbeddingCache,
   writeAgent2ReviewMemory,
 } from './memory.js'
-import { setSpanAttributes, truncate, withSpan } from './instrumentation.mjs'
+import { getTracingStatus, setSpanAttributes, shutdownTracing, truncate, withSpan } from './instrumentation.mjs'
 
 const app = express()
 const PORT = process.env.PORT || 8787
+const CHAT_MEMORY_PACKET_TIMEOUT_MS = Number(process.env.CHAT_MEMORY_PACKET_TIMEOUT_MS || 1200)
+const DEV_SHUTDOWN_ENABLED = process.env.NODE_ENV !== 'production' && process.env.DEV_SHUTDOWN_ON_CLOSE !== 'false'
+let devShutdownTimer = null
 
 app.use(cors())
 app.use(express.json({ limit: '12mb' })) // board PNGs can be large
+
+if (process.env.MEMORY_WARM_EMBEDDINGS_ON_START !== 'false') {
+  warmEmbeddingCache()
+    .then((ready) => {
+      if (ready) console.info('[memory] local embedding worker warmed.')
+    })
+    .catch((err) => console.warn(`[memory] local embedding warmup skipped: ${err?.message || err}`))
+}
 
 // ---- Deepgram: configured check (the audio relay is a WebSocket, see below) ----
 app.get('/api/deepgram/status', (_req, res) => res.json({ configured: deepgramEnabled }))
@@ -231,7 +245,25 @@ app.get('/api/providers', (_req, res) => {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
-app.post('/api/tutor-review', (req, res) => {
+app.get('/api/tracing/status', (_req, res) => res.json(getTracingStatus()))
+
+app.post('/api/dev/shutdown', (req, res) => {
+  if (!DEV_SHUTDOWN_ENABLED) return res.status(404).json({ error: 'Dev shutdown is disabled.' })
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'Dev shutdown only accepts local requests.' })
+  const requestedDelay = Number(req.body?.delayMs ?? req.query?.delayMs ?? 5000)
+  const delayMs = Math.min(15000, Math.max(1000, Number.isFinite(requestedDelay) ? requestedDelay : 5000))
+  scheduleDevShutdown(delayMs)
+  res.json({ scheduled: true, delayMs })
+})
+
+app.post('/api/dev/shutdown/cancel', (req, res) => {
+  if (!DEV_SHUTDOWN_ENABLED) return res.status(404).json({ error: 'Dev shutdown is disabled.' })
+  if (!isLocalRequest(req)) return res.status(403).json({ error: 'Dev shutdown only accepts local requests.' })
+  const canceled = cancelDevShutdown()
+  res.json({ canceled })
+})
+
+app.post('/api/tutor-review', async (req, res) => {
   try {
     const { messages = [], transcript, boardState = '', lessonGoal = '', sessionId, userId, recordingId } = req.body || {}
     const review = scoreTutorTranscript({
@@ -244,9 +276,7 @@ app.post('/api/tutor-review', (req, res) => {
     })
     const summary = formatTutorReview(review)
     if (sessionId) {
-      writeAgent2ReviewMemory({ sessionId, review, summary }).catch((err) => {
-        console.warn(`[memory] Agent 2 review write failed: ${err?.message || err}`)
-      })
+      await writeAgent2ReviewMemory({ sessionId, review, summary })
     }
     res.json({ review, summary })
   } catch (err) {
@@ -268,6 +298,12 @@ app.post('/api/memory/session/:sessionId/end', async (req, res) => {
       'input.value': truncate({ sessionId, metadata }),
       'attributes.input.value': truncate({ sessionId, metadata }),
     }, async (span) => {
+      const agent2 = await ensureAgent2ReviewForEndedSession({ sessionId, userId, metadata })
+      setSpanAttributes(span, {
+        'agent2.auto_review.triggered': agent2.triggered,
+        'agent2.auto_review.skipped_reason': agent2.skippedReason,
+        'agent2.auto_review.verdict': agent2.review?.verdict,
+      })
       const summary = await finalizeAgent1Session({ sessionId, userId, metadata })
       setSpanAttributes(span, {
         'output.value': truncate(summary),
@@ -356,7 +392,7 @@ app.post('/api/chat', async (req, res) => {
   }).catch((err) => console.warn(`[memory] user event write failed: ${err?.message || err}`))
   let memoryNote = ''
   try {
-    const packet = await getAgentMemoryPacket(requestSessionId, {
+    const packet = await getChatMemoryPacket(requestSessionId, {
       userId,
       queryText: latestUserTurn?.text || '',
       activeView: mode,
@@ -392,55 +428,92 @@ app.post('/api/chat', async (req, res) => {
   })
 
   try {
-    await appendMemoryEvent(requestSessionId, {
-      id: `${requestId}_assistant_started`,
-      sourceAgent: 'agent1',
-      type: 'assistant_response_started',
-      payload: { providerId, modelId, mode },
-    })
-    const upstream =
-      provider.type === 'anthropic'
-        ? await callAnthropic({ base, apiKey, model: modelId, messages: turns, image, sendImage, signal: abort.signal })
-        : await callOpenAI({ base, apiKey, model: modelId, messages: turns, image, sendImage, signal: abort.signal })
-
-    if (!upstream.ok || !upstream.body) {
-      const detail = await readError(upstream)
-      appendMemoryEvent(requestSessionId, {
-        id: `${requestId}_assistant_failed`,
+    const streamed = await withSpan('agent1.chat', {
+      'openinference.span.kind': 'LLM',
+      'attributes.openinference.span.kind': 'LLM',
+      'llm.provider': providerId,
+      'llm.model_name': modelId,
+      'attributes.llm.model_name': modelId,
+      'input.value': truncate(latestUserTurn?.text || ''),
+      'attributes.input.value': truncate(latestUserTurn?.text || ''),
+      'session.id': requestSessionId,
+      'user.id': userId,
+      'request.id': requestId,
+      'board.active_view': mode,
+      'board.used': !!image,
+      'board.image_attached': !!image,
+      'agent1.want_act': !!wantAct,
+      'memory.context_attached': !!memoryNote,
+    }, async (span) => {
+      await appendMemoryEvent(requestSessionId, {
+        id: `${requestId}_assistant_started`,
         sourceAgent: 'agent1',
-        type: 'assistant_response_failed',
-        payload: { providerId, modelId, error: `${provider.label} ${upstream.status}: ${detail}` },
-      }).catch((err) => console.warn(`[memory] failure event write failed: ${err?.message || err}`))
-      res.write(`data: ${JSON.stringify({ error: `${provider.label} ${upstream.status}: ${detail}` })}\n\n`)
-      return res.end()
-    }
+        type: 'assistant_response_started',
+        payload: { providerId, modelId, mode },
+      })
+      const upstream =
+        provider.type === 'anthropic'
+          ? await callAnthropic({ base, apiKey, model: modelId, messages: turns, image, sendImage, signal: abort.signal })
+          : await callOpenAI({ base, apiKey, model: modelId, messages: turns, image, sendImage, signal: abort.signal })
 
-    let assistantText = ''
-    const emit = (text) => {
-      assistantText += text
-      res.write(`data: ${JSON.stringify({ t: text })}\n\n`)
-    }
-    await pumpSSE(upstream.body, (data) => {
-      if (data === '[DONE]') return
-      try {
-        const evt = JSON.parse(data)
-        if (provider.type === 'anthropic') {
-          if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') emit(evt.delta.text)
-          else if (evt.type === 'error') res.write(`data: ${JSON.stringify({ error: evt.error?.message || 'stream error' })}\n\n`)
-        } else {
-          const delta = evt.choices?.[0]?.delta?.content
-          if (typeof delta === 'string') emit(delta)
-        }
-      } catch {
-        /* keep-alive / partial json */
+      setSpanAttributes(span, { 'http.response.status_code': upstream.status })
+
+      if (!upstream.ok || !upstream.body) {
+        const detail = await readError(upstream)
+        const message = `${provider.label} ${upstream.status}: ${detail}`
+        setSpanAttributes(span, {
+          'output.value': message,
+          'attributes.output.value': message,
+        })
+        appendMemoryEvent(requestSessionId, {
+          id: `${requestId}_assistant_failed`,
+          sourceAgent: 'agent1',
+          type: 'assistant_response_failed',
+          payload: { providerId, modelId, error: message },
+        }).catch((err) => console.warn(`[memory] failure event write failed: ${err?.message || err}`))
+        res.write(`data: ${JSON.stringify({ error: message })}\n\n`)
+        res.end()
+        return false
       }
+
+      let assistantText = ''
+      const emit = (text) => {
+        assistantText += text
+        res.write(`data: ${JSON.stringify({ t: text })}\n\n`)
+      }
+      await pumpSSE(upstream.body, (data) => {
+        if (data === '[DONE]') return
+        try {
+          const evt = JSON.parse(data)
+          if (provider.type === 'anthropic') {
+            if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') emit(evt.delta.text)
+            else if (evt.type === 'error') {
+              const message = evt.error?.message || 'stream error'
+              setSpanAttributes(span, { 'llm.stream.error': message })
+              res.write(`data: ${JSON.stringify({ error: message })}\n\n`)
+            }
+          } else {
+            const delta = evt.choices?.[0]?.delta?.content
+            if (typeof delta === 'string') emit(delta)
+          }
+        } catch {
+          /* keep-alive / partial json */
+        }
+      })
+      await appendMemoryEvent(requestSessionId, {
+        id: `${requestId}_assistant_completed`,
+        sourceAgent: 'agent1',
+        type: 'assistant_response_completed',
+        payload: { providerId, modelId, text: assistantText, mode },
+      })
+      setSpanAttributes(span, {
+        'output.value': truncate(assistantText),
+        'attributes.output.value': truncate(assistantText),
+        'llm.response.length': assistantText.length,
+      })
+      return true
     })
-    await appendMemoryEvent(requestSessionId, {
-      id: `${requestId}_assistant_completed`,
-      sourceAgent: 'agent1',
-      type: 'assistant_response_completed',
-      payload: { providerId, modelId, text: assistantText, mode },
-    })
+    if (!streamed) return
 
     res.write('data: [DONE]\n\n')
     res.end()
@@ -609,6 +682,37 @@ function askInputText(transcriptWindow, question) {
   return `Teacher's explanation around this moment:\n"""\n${(transcriptWindow || '(no transcript available for this moment)').slice(0, 4000)}\n"""\n\nStudent's question: "${(question || '').slice(0, 600)}"`
 }
 
+async function ensureAgent2ReviewForEndedSession({ sessionId, userId, metadata = {} }) {
+  const context = await getSessionReviewContext(sessionId)
+  if (context.hasAgent2Review) return { triggered: false, skippedReason: 'already_reviewed' }
+  if (!context.hasSubstantiveQuestion) return { triggered: false, skippedReason: 'no_substantive_student_turn' }
+  if (!context.transcript.trim()) return { triggered: false, skippedReason: 'empty_transcript' }
+
+  const review = scoreTutorTranscript({
+    transcript: context.transcript,
+    boardState: JSON.stringify(metadata.context || metadata.boardState || ''),
+    lessonGoal: metadata.lessonGoal || '',
+    sessionId,
+    userId,
+    recordingId: metadata.recordingId,
+  })
+  const summary = formatTutorReview(review)
+  await writeAgent2ReviewMemory({ sessionId, review, summary })
+  return { triggered: true, review, summary }
+}
+
+async function getChatMemoryPacket(sessionId, filters) {
+  const fullPacket = getAgentMemoryPacket(sessionId, filters)
+  const timeout = new Promise((resolve) => {
+    setTimeout(() => resolve(null), CHAT_MEMORY_PACKET_TIMEOUT_MS)
+  })
+  const packet = await Promise.race([fullPacket, timeout])
+  if (packet) return packet
+
+  console.warn(`[memory] semantic packet timed out after ${CHAT_MEMORY_PACKET_TIMEOUT_MS}ms; using fast session memory.`)
+  return getAgentMemoryPacket(sessionId, { ...filters, includeSemantic: false })
+}
+
 async function pumpSSE(body, onData) {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -641,16 +745,14 @@ async function readError(res) {
   }
 }
 
-const httpServer = app.listen(PORT, () => {
-  const configured = Object.keys(PROVIDERS).filter((id) => envKeyFor(id))
-  console.log(`\n  FerbAI proxy → http://localhost:${PORT}`)
-  console.log(`  keys from .env: ${configured.length ? configured.join(', ') : '(none — paste in Settings)'}\n`)
-})
+const httpServer = createServer(app)
+httpServer.on('error', handleServerError)
 
 // ---- Deepgram audio relay ----
 // The browser streams mic audio here; we forward it to Deepgram with the
 // server-held key and relay transcripts back. Avoids needing browser tokens.
 const dgWss = new WebSocketServer({ server: httpServer, path: '/api/deepgram/stream' })
+dgWss.on('error', handleServerError)
 dgWss.on('connection', (client) => {
   if (!deepgramEnabled || !dgClient) { client.close(); return }
   const dg = dgClient.listen.live(LIVE_OPTIONS)
@@ -672,14 +774,52 @@ dgWss.on('connection', (client) => {
 })
 function safeSend(ws, obj) { try { if (ws.readyState === 1) ws.send(JSON.stringify(obj)) } catch { /* */ } }
 
-httpServer.on('error', (err) => {
+function isLocalRequest(req) {
+  const remote = req.ip || req.socket?.remoteAddress || ''
+  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote) || remote.endsWith(':127.0.0.1')
+}
+
+function cancelDevShutdown() {
+  if (!devShutdownTimer) return false
+  clearTimeout(devShutdownTimer)
+  devShutdownTimer = null
+  console.info('[dev] canceled tab-close shutdown.')
+  return true
+}
+
+function scheduleDevShutdown(delayMs) {
+  cancelDevShutdown()
+  console.info(`[dev] tab-close shutdown scheduled in ${delayMs}ms.`)
+  devShutdownTimer = setTimeout(() => {
+    console.info('[dev] shutting down API after browser tab close.')
+    dgWss.close(() => {
+      httpServer.close(async () => {
+        await shutdownTracing()
+        process.exit(0)
+      })
+    })
+    setTimeout(async () => {
+      await shutdownTracing()
+      process.exit(0)
+    }, 3000).unref()
+  }, delayMs)
+  devShutdownTimer.unref?.()
+}
+
+function handleServerError(err) {
   if (err.code === 'EADDRINUSE') {
     console.error(
       `\n  ✗ Port ${PORT} is already in use — another FerbAI proxy is probably still running.\n` +
-        `    Stop it, or set a different port:  PORT=8788 npm run dev\n` +
+        `    Stop it, or set a different port:  $env:PORT=8788; $env:VITE_API_TARGET='http://localhost:8788'; npm run dev\n` +
         `    (Windows: find it with  netstat -ano | findstr :${PORT}  then  taskkill /PID <pid> /F)\n`,
     )
     process.exit(1)
   }
   throw err
+}
+
+httpServer.listen(PORT, () => {
+  const configured = Object.keys(PROVIDERS).filter((id) => envKeyFor(id))
+  console.log(`\n  FerbAI proxy -> http://localhost:${PORT}`)
+  console.log(`  keys from .env: ${configured.length ? configured.join(', ') : '(none - paste in Settings)'}\n`)
 })

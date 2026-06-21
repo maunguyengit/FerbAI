@@ -44,6 +44,41 @@ export default function App() {
   const auth = useAuth()
   const recorder = useRecorder()
 
+  useEffect(() => {
+    if (!import.meta.env.DEV || import.meta.env.VITE_DEV_SHUTDOWN_ON_CLOSE === 'false') return
+
+    const devApiTarget = import.meta.env.VITE_API_TARGET || 'http://localhost:8787'
+    const shutdownUrl = `${devApiTarget}/api/dev/shutdown`
+    const cancelUrl = `${devApiTarget}/api/dev/shutdown/cancel`
+
+    const cancelPendingShutdown = () => {
+      fetch(cancelUrl, { method: 'POST', keepalive: true }).catch(() => {})
+    }
+    const cancelTimers = [
+      window.setTimeout(cancelPendingShutdown, 1000),
+      window.setTimeout(cancelPendingShutdown, 3000),
+    ]
+
+    const scheduleShutdown = () => {
+      const body = JSON.stringify({ delayMs: 5000 })
+      const blob = new Blob([body], { type: 'application/json' })
+      if (!navigator.sendBeacon(shutdownUrl, blob)) {
+        fetch(shutdownUrl, {
+          method: 'POST',
+          body,
+          headers: { 'content-type': 'application/json' },
+          keepalive: true,
+        }).catch(() => {})
+      }
+    }
+
+    window.addEventListener('pagehide', scheduleShutdown)
+    return () => {
+      window.removeEventListener('pagehide', scheduleShutdown)
+      cancelTimers.forEach((timer) => window.clearTimeout(timer))
+    }
+  }, [])
+
   // cloud (DB) recordings for the signed-in user + any shared ones opened by link
   const [cloud, setCloud] = useState<Recording[]>([])
   const [opened, setOpened] = useState<Recording[]>([])

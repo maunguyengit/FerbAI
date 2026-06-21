@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n web,api -c yellow,blue \"vite\" \"node server/index.js\"",
+    "dev": "concurrently --kill-others -n api,web -c blue,yellow \"node server/index.js\" \"node server/wait_for_api.mjs && vite\"",
     "dev:web": "vite",
     "dev:api": "node server/index.js",
     "build": "tsc -b && vite build",

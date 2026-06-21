@@ -168,7 +168,7 @@ async function arizeEvaluatorForAgent1Session(args) {
   const sessionId = String(args.sessionId || '').trim()
   if (!sessionId) throw new Error('sessionId is required')
   const guidance = {
-    note: 'FerbAI does not yet emit Arize/OpenInference traces itself. This tool can trigger an existing Arize task only if Agent 1 session traces are already in an Arize project and the task filters/map columns for attributes.session.id.',
+    note: 'FerbAI emits Arize/OpenInference traces when ARIZE_SPACE_ID and ARIZE_API_KEY are configured. This tool can trigger an existing Arize task when Agent 1 session traces are in the configured Arize project and the task filters/map columns for attributes.session.id.',
     recommendedEvaluator: {
       granularity: 'session',
       templateVariables: ['conversation'],

@@ -9,7 +9,7 @@ export default defineConfig({
     open: true,
     proxy: {
       // forward API calls (HTTP + the Deepgram audio WebSocket) to the backend
-      '/api': { target: 'http://localhost:8787', ws: true },
+      '/api': { target: process.env.VITE_API_TARGET || 'http://localhost:8787', ws: true },
     },
   },
 })

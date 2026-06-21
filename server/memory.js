@@ -634,12 +634,61 @@ function eventToMessage(event) {
   return null
 }
 
+function stripGeneratedBlocks(text) {
+  return String(text || '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/(?:const|let|var)\s+\w+\s*=\s*`[\s\S]*?`;/g, '')
+    .replace(/document\.getElementById[\s\S]*?(?:;|\n)/gi, '')
+    .replace(/html\s*\+=\s*`[\s\S]*?`;?/gi, '')
+    .replace(/<\/?(?:div|span|p|button|input|svg|canvas|section|article|ul|ol|li|table|tr|td|th)[^>]*>/gi, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim()
+}
+
+function isTrivialUtterance(text) {
+  const clean = stripGeneratedBlocks(text).toLowerCase().replace(/[^a-z0-9\s']/g, ' ').trim()
+  if (!clean) return true
+  const words = clean.split(/\s+/).filter(Boolean)
+  if (words.length <= 2 && /\b(hi|hello|hey|yo|sup|ok|okay|cool|nice|thanks?|thank you|bye)\b/.test(clean)) return true
+  return isClosingUtterance(clean)
+}
+
+function hasSubstantiveStudentTurn(messages) {
+  return messages.some((message) => {
+    if (message.role !== 'user' || isTrivialUtterance(message.text)) return false
+    const words = stripGeneratedBlocks(message.text).match(/[A-Za-z0-9]+/g) || []
+    return words.length >= 3
+  })
+}
+
+function isClosingUtterance(text) {
+  const clean = stripGeneratedBlocks(text).toLowerCase().replace(/[^a-z0-9\s']/g, ' ').trim()
+  if (!clean) return true
+  const words = clean.split(/\s+/).filter(Boolean)
+  if (words.length > 8) return false
+  return /\b(thanks?|thank you|im good|i'm good|all good|no thanks|that'?s all|bye|goodbye|see you)\b/.test(clean)
+}
+
+function lastSubstantiveUserText(messages) {
+  return [...messages]
+    .reverse()
+    .find((message) => message.role === 'user' && !isClosingUtterance(message.text))
+    ?.text || ''
+}
+
 function buildSessionSummary(sessionId, events, metadata = {}) {
-  const messages = events.map(eventToMessage).filter((message) => message && message.text)
-  const transcript = messagesToTranscript(messages)
+  const messages = events
+    .map(eventToMessage)
+    .filter((message) => message && stripGeneratedBlocks(message.text))
+    .map((message) => ({ ...message, text: stripGeneratedBlocks(message.text) }))
+  const summaryMessages = messages.filter((message) => message.role !== 'user' || !isClosingUtterance(message.text))
+  const transcript = messagesToTranscript(summaryMessages)
   const userTurns = messages.filter((message) => message.role === 'user')
   const assistantTurns = messages.filter((message) => message.role === 'assistant')
-  const lastUser = [...userTurns].reverse()[0]?.text || ''
+  const lastUser = lastSubstantiveUserText(messages)
   const failedTurns = events.filter((event) => event.type === 'assistant_response_failed').length
   const toolResults = events.filter((event) => event.type === 'tool_result')
   const topics = extractTopics(transcript)
@@ -722,7 +771,7 @@ function summarizeTranscript({ transcript, topics, userTurns, assistantTurns, fa
   if (!transcript.trim()) return 'No completed tutoring exchange was captured.'
   const topicText = topics.length ? ` Topics/entities: ${topics.slice(0, 6).join(', ')}.` : ''
   const failureText = failedTurns ? ` ${failedTurns} assistant turn(s) failed or were interrupted.` : ''
-  return `The session contains ${userTurns} user turn(s) and ${assistantTurns} assistant turn(s).${topicText}${failureText} Recent focus: ${transcript.slice(-500)}`
+  return `The session contains ${userTurns} user turn(s) and ${assistantTurns} assistant turn(s).${topicText}${failureText} Recent focus: ${stripGeneratedBlocks(transcript).slice(-500)}`
 }
 
 function inferGoal(text) {
@@ -838,6 +887,21 @@ export async function finalizeAgent1Session({ sessionId, userId = 'local-user', 
   return summary
 }
 
+export async function getSessionReviewContext(sessionId) {
+  const [events, state] = await Promise.all([readEvents(sessionId), readState(sessionId)])
+  const messages = events
+    .map(eventToMessage)
+    .filter((message) => message && stripGeneratedBlocks(message.text))
+    .map((message) => ({ ...message, text: stripGeneratedBlocks(message.text) }))
+  return {
+    events,
+    messages,
+    transcript: messagesToTranscript(messages),
+    hasSubstantiveQuestion: hasSubstantiveStudentTurn(messages),
+    hasAgent2Review: Boolean((state.agent2Reviews || []).length || events.some((event) => event.type === 'agent2_review_completed')),
+  }
+}
+
 export async function writeAgent2ReviewMemory({ sessionId, review, summary }) {
   const reviewSummary = buildAgent2Summary({ sessionId, review, summary })
   const state = await readState(sessionId)
@@ -858,6 +922,7 @@ export async function writeAgent2ReviewMemory({ sessionId, review, summary }) {
 
 export async function getAgentMemoryPacket(sessionId, filters = {}) {
   const userId = filters.userId || 'local-user'
+  const includeSemantic = filters.includeSemantic !== false
   const [events, state, longTermSummaries] = await Promise.all([
     readEvents(sessionId),
     readState(sessionId),
@@ -865,7 +930,7 @@ export async function getAgentMemoryPacket(sessionId, filters = {}) {
   ])
   let similarSummaries = []
   const queryText = [filters.queryText, filters.topic, filters.activeView].filter(Boolean).join('\n')
-  if (queryText.trim()) {
+  if (includeSemantic && queryText.trim()) {
     const queryEmbedding = await embedText(queryText)
     if (queryEmbedding) {
       similarSummaries = await readSimilarSummariesFromVector(userId, queryEmbedding, {
@@ -920,18 +985,28 @@ export async function getAgentMemoryPacket(sessionId, filters = {}) {
   }
 }
 
+export async function warmEmbeddingCache() {
+  const backend = (process.env.MEMORY_EMBEDDINGS_BACKEND || 'openai').toLowerCase()
+  if (!['redisvl-hf', 'hf', 'sentence-transformers'].includes(backend)) return false
+  const embedding = await embedText('FerbAI warm embedding cache readiness check.')
+  return Array.isArray(embedding) && embedding.length > 0
+}
+
 function buildAgent2Guidance(reviews) {
   return reviews
     .slice(-3)
-    .flatMap((review) =>
-      (review.findings || []).map((finding) => ({
+    .flatMap((review) => {
+      const findings = review.findings || []
+      const risks = findings.filter((finding) => finding.type === 'risk').slice(-4)
+      const recommendations = findings.filter((finding) => finding.type !== 'risk').slice(-4)
+      return [...risks, ...recommendations].map((finding) => ({
         type: finding.type,
         text: finding.text,
         verdict: review.verdict,
         confidence: review.confidence,
         reviewId: review.id,
         createdAt: review.createdAt,
-      })),
-    )
-    .slice(-8)
+      }))
+    })
+    .slice(-12)
 }

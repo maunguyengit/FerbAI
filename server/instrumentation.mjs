@@ -43,6 +43,32 @@ export function isTracingEnabled() {
   return tracingEnabled
 }
 
+export function getTracingStatus() {
+  return {
+    enabled: tracingEnabled,
+    projectName: PROJECT_NAME,
+    endpoint: COLLECTOR_ENDPOINT,
+    hasSpaceId: !!SPACE_ID,
+    hasApiKey: !!API_KEY,
+  }
+}
+
+export async function flushTracing() {
+  try {
+    await provider.forceFlush()
+  } catch (err) {
+    console.warn(`[tracing] forceFlush failed: ${err?.message || err}`)
+  }
+}
+
+export async function shutdownTracing() {
+  try {
+    await provider.shutdown()
+  } catch (err) {
+    console.warn(`[tracing] shutdown failed: ${err?.message || err}`)
+  }
+}
+
 export function truncate(value, limit = 4000) {
   if (value == null) return ''
   const text = typeof value === 'string' ? value : JSON.stringify(value)
@@ -105,3 +131,15 @@ export function withSpanSync(name, attrs, fn) {
     }
   })
 }
+
+let shuttingDown = false
+async function handleShutdown(signal) {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.info(`[tracing] ${signal} received; flushing spans before exit.`)
+  await shutdownTracing()
+  process.exit(0)
+}
+
+process.once('SIGINT', () => { handleShutdown('SIGINT') })
+process.once('SIGTERM', () => { handleShutdown('SIGTERM') })
