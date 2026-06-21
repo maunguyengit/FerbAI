@@ -3,12 +3,15 @@ import Whiteboard from './components/Whiteboard'
 import Toolbar from './components/Toolbar'
 import GraphView from './components/GraphView'
 import VisualizationView from './components/viz/VisualizationView'
+import ReplayView from './components/replay/ReplayView'
+import RecordControl from './components/RecordControl'
 import ChatPanel from './components/ChatPanel'
 import ModelSelector from './components/ModelSelector'
 import SettingsModal from './components/SettingsModal'
 import { fetchProviderStatus } from './lib/ai'
 import { DEFAULT_SELECTION } from './lib/providers'
 import { catalogForPrompt } from './lib/viz/registry'
+import { useRecorder } from './lib/recording/useRecorder'
 import { getSelection, setSelection as persistSelection } from './lib/storage'
 import type { AIAction, AIGraphEquation, ChatContext, GraphHandle, Tool, View, VizHandle, VizSpec, WhiteboardHandle } from './lib/types'
 import './App.css'
@@ -30,6 +33,13 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [keysVersion, setKeysVersion] = useState(0)
   const [ready, setReady] = useState(false)
+
+  const recorder = useRecorder()
+
+  const startRecording = () => {
+    setView('board')
+    recorder.start({ title: `Lesson ${recorder.recordings.length + 1}`, getElements: () => wbRef.current?.getElements() ?? [] })
+  }
 
   useEffect(() => { persistSelection(selection) }, [selection])
 
@@ -80,6 +90,7 @@ export default function App() {
     { id: 'board', label: '✎ Board' },
     { id: 'graph', label: '∿ Graph' },
     { id: 'viz', label: '◆ Learn' },
+    { id: 'replay', label: '▶ Replay' },
   ]
 
   return (
@@ -111,6 +122,13 @@ export default function App() {
         </div>
 
         <div className="topbar__right">
+          <RecordControl
+            status={recorder.status}
+            elapsedMs={recorder.elapsedMs}
+            hasAudio={recorder.hasAudio}
+            onStart={startRecording}
+            onStop={() => { recorder.stop().then(() => setView('replay')) }}
+          />
           <span className={`ready ${ready ? 'ready--on' : 'ready--off'}`}>
             <span className="ready__dot" /> {ready ? 'ready' : 'offline'}
           </span>
@@ -136,6 +154,7 @@ export default function App() {
                 ref={wbRef}
                 tool={tool} color={color} width={width}
                 onHistoryChange={(u, r) => { setCanUndo(u); setCanRedo(r) }}
+                onBoardEvent={recorder.recordEvent}
               />
             </div>
           </div>
@@ -146,6 +165,10 @@ export default function App() {
 
           <div className={`app__viz ${view === 'viz' ? '' : 'is-hidden'}`}>
             <VisualizationView ref={vizRef} />
+          </div>
+
+          <div className={`app__replay ${view === 'replay' ? '' : 'is-hidden'}`}>
+            <ReplayView recordings={recorder.recordings} onDelete={recorder.remove} />
           </div>
         </section>
 

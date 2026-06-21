@@ -67,6 +67,8 @@ export interface WhiteboardHandle {
   getImageDataURL: () => string | null
   /** True when there is anything drawn. */
   isEmpty: () => boolean
+  /** current committed elements (for recording snapshots) */
+  getElements: () => Element[]
   /** Board size + content bounds, for accurate AI placement. */
   getBoardMeta: () => BoardMeta
   /** Render AI drawing instructions onto the board. Returns count applied. */
@@ -129,7 +131,7 @@ export interface VizHandle {
 }
 
 // ---------- Left-panel view ----------
-export type View = 'board' | 'graph' | 'viz'
+export type View = 'board' | 'graph' | 'viz' | 'replay'
 
 /** What the chat sends to the AI about the active left-panel view. */
 export interface ChatContext {
